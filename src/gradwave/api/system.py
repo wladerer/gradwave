@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gradwave.api._common import SPIN_XC_REGISTRY, time_reversal_ok
 from gradwave.core.xc.spin import SpinXC
@@ -112,6 +112,48 @@ def _fft_grid(system: System | USPPSystem) -> FFTGrid:
     """Both `System.grid` and `USPPSystem.grid` are `FFTGrid`; this just names
     the shared field for callers that hold the `System | USPPSystem` union."""
     return system.grid
+
+
+def build_scaled_system(
+    inp: Input,
+    upfs: list[UPFData | PAWData],
+    uspp: bool,
+    species_of_atom: list[int],
+    cell: Any,
+    positions: Any,
+    *,
+    fft_shape: tuple[int, ...] | None,
+    time_reversal: bool = True,
+) -> System | USPPSystem:
+    """Build the System/USPPSystem for a given (cell, positions) on a PINNED FFT
+    grid — the shared body behind the eos volume spokes and the elastic strain
+    spokes. Both scan a deformed cell at fixed ecut/kmesh/nbands and must reuse
+    one FFT box across the scan (so E(V)/σ(ε) carry no grid-discontinuity step),
+    which is exactly what ``fft_shape`` pins. NC vs USPP/PAW by the ``uspp`` flag.
+
+    This is a module-level function (not a closure) so the SeedPool worker path
+    can call it in a spawned process — it must stay picklable. The serial
+    closures and the workers in both drivers route through here.
+
+    ``time_reversal`` is threaded to the norm-conserving ``setup_system`` only
+    (the USPP/PAW path derives Kramers internally): the isotropic eos scan
+    leaves it at the default True, while the elastic scan passes the
+    spinor-aware value from ``time_reversal_ok``."""
+    if uspp:
+        from gradwave.scf.uspp import setup_uspp
+
+        return setup_uspp(
+            cell, positions, species_of_atom, _as_paws(upfs), ecut=inp.ecut,
+            kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
+            use_symmetry=inp.symmetry, fft_shape=fft_shape)
+    from gradwave.scf.loop import setup_system
+
+    return setup_system(
+        cell=cell, positions=positions, species_of_atom=species_of_atom,
+        upfs=_as_upfs(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+        kshift=inp.kpoints.shift, nbands=inp.nbands,
+        use_symmetry=inp.symmetry, time_reversal=time_reversal,
+        fft_shape=fft_shape)
 
 
 def _resolve_kmesh(inp: Input) -> tuple[int, int, int]:

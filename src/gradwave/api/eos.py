@@ -6,7 +6,12 @@ import logging
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from gradwave.api.scf import run_scf
-from gradwave.api.system import _as_paws, _as_upfs, _fft_grid, _is_uspp, _species_upfs
+from gradwave.api.system import (
+    _fft_grid,
+    _is_uspp,
+    _species_upfs,
+    build_scaled_system,
+)
 from gradwave.inputs import Input
 
 if TYPE_CHECKING:
@@ -23,29 +28,17 @@ def _eos_rebuild(inp: Input) -> tuple[Any, bool, Any]:
     return upfs, _is_uspp(upfs), soa
 
 
-def _eos_build(
+def _eos_scaled(
     inp: Input, upfs: Any, uspp: bool, soa: Any, scale: float, fixed: Any,
 ) -> tuple[System | USPPSystem, Any]:
-    """Isotropically-scaled system on the pinned grid (mirrors run_eos'
-    ``_build_at``); returns ``(system, cell)``."""
+    """Isotropically-scaled system on the pinned grid via the shared
+    ``build_scaled_system``; returns ``(system, cell)``."""
     import numpy as np
 
-    cell0 = np.asarray(inp.atoms.cell.array, dtype=float)
-    cell = cell0 * scale ** (1.0 / 3.0)
+    cell = np.asarray(inp.atoms.cell.array, dtype=float) * scale ** (1.0 / 3.0)
     pos = inp.atoms.get_scaled_positions() @ cell
-    if uspp:
-        from gradwave.scf.uspp import setup_uspp
-
-        return setup_uspp(
-            cell, pos, soa, _as_paws(upfs), ecut=inp.ecut,
-            kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
-            use_symmetry=inp.symmetry, fft_shape=fixed), cell
-    from gradwave.scf.loop import setup_system
-
-    return setup_system(
-        cell=cell, positions=pos, species_of_atom=soa, upfs=_as_upfs(upfs),
-        ecut=inp.ecut, kmesh=inp.kpoints.mesh, kshift=inp.kpoints.shift,
-        nbands=inp.nbands, use_symmetry=inp.symmetry, fft_shape=fixed), cell
+    return build_scaled_system(
+        inp, upfs, uspp, soa, cell, pos, fft_shape=fixed), cell
 
 
 class _EosSpoke(NamedTuple):
@@ -66,7 +59,7 @@ def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool, int, b
     from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, soa = _eos_rebuild(spoke.inp)
-    system, cell = _eos_build(spoke.inp, upfs, uspp, soa, spoke.scale, spoke.fixed)
+    system, cell = _eos_scaled(spoke.inp, upfs, uspp, soa, spoke.scale, spoke.fixed)
     start_from = (as_start_from(load_checkpoint(spoke.ckpt_path))
                   if spoke.warm_start else None)
     res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
@@ -116,7 +109,8 @@ def run_eos(
     the parallelism there)."""
     import numpy as np
 
-    from gradwave.postscf.eos import EV_A3_TO_GPA, fit_bm3
+    from gradwave.constants import EV_A3_TO_GPA
+    from gradwave.postscf.eos import fit_bm3
 
     if inp.distributed:
         # every rank scans the identical (full-mesh-reduced) E(V); quiet all but
@@ -136,20 +130,9 @@ def run_eos(
     ) -> tuple[System | USPPSystem, Any]:
         cell = cell0 * scale ** (1.0 / 3.0)
         pos = frac @ cell
-        if uspp:
-            from gradwave.scf.uspp import setup_uspp
-
-            return setup_uspp(
-                cell, pos, species_of_atom, _as_paws(upfs), ecut=inp.ecut,
-                kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
-                use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
-        from gradwave.scf.loop import setup_system
-
-        return setup_system(
-            cell=cell, positions=pos, species_of_atom=species_of_atom,
-            upfs=_as_upfs(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
-            kshift=inp.kpoints.shift, nbands=inp.nbands,
-            use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
+        return build_scaled_system(
+            inp, upfs, uspp, species_of_atom, cell, pos,
+            fft_shape=fft_shape), cell
 
     # pass 1: natural FFT grid per volume, then pin the elementwise max so
     # every volume shares one grid (larger cells otherwise pick a finer grid)

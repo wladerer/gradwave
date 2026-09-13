@@ -17,6 +17,23 @@ class InputError(ValueError):
     ``load_input``) so the message points at the file the user edited."""
 
 
+# The single source of truth for the set of recognized task names. parse.py
+# derives its task allowlist and the "unknown task" error string from this;
+# api.dispatch derives its routing table from it and asserts full coverage at
+# import time, so a task name added here without a driver branch (or vice
+# versa) is caught immediately rather than passing validation and then dying on
+# a bare ValueError. (Lives in inputs because inputs is a leaf that cannot
+# import api; the api layer imports this constant, not the other way round.)
+TASKS: tuple[str, ...] = (
+    "scf", "relax", "neb", "bands", "optics", "magnetism", "eos", "elastic",
+    "phonons", "thermochem", "surface_energy", "qha", "magnons", "flapw", "nmr",
+)
+
+# Tasks whose SCF is wired to route through the k-point-sharded distributed
+# (torchrun) path. Shared by parse.py's validation and api.dispatch's run gate.
+DISTRIBUTED_TASKS: tuple[str, ...] = ("scf", "bands", "relax", "eos")
+
+
 @dataclass(frozen=True)
 class MixingParams:
     scheme: str = "auto"  # auto | pulay | broyden | johnson. auto (the default)
@@ -871,6 +888,17 @@ class EOSParams:
     # collect the discount. Set False to cold-start every volume (the reference
     # for the cold-vs-warm A/B). Default on.
     warm_start: bool = True
+    # Noise-aware uncertainty pass. When ``sigma_e`` (eV/atom) is set, the per-
+    # atom E(V) points are Monte-Carlo bootstrapped through the BM3 fit
+    # (``postscf.eos.bootstrap_bm3``) and the eos summary block gains an
+    # ``uncertainty`` sub-dict: sigma(V0), sigma(B0), sigma(E0), sigma(B0').
+    # Feed it the measured SCF-convergence noise floor
+    # (``postscf.convergence_noise.estimate_noise_floor(...).sigma_e_per_atom``).
+    # None (the default) leaves the output unchanged. ``uq_samples`` is the
+    # number of bootstrap draws; ``uq_seed`` seeds them for reproducibility.
+    sigma_e: float | None = None
+    uq_samples: int = 200
+    uq_seed: int = 0
 
     def __post_init__(self):
         # coerce a YAML list to a tuple (frozen dataclass hashability) and
@@ -886,6 +914,13 @@ class EOSParams:
         if self.n_workers < 1:
             raise InputError(
                 f"eos.n_workers must be >= 1, got {self.n_workers}")
+        if self.sigma_e is not None and self.sigma_e < 0.0:
+            raise InputError(
+                f"eos.sigma_e (eV/atom noise floor) must be >= 0, got "
+                f"{self.sigma_e}")
+        if self.uq_samples < 1:
+            raise InputError(
+                f"eos.uq_samples must be >= 1, got {self.uq_samples}")
 
 
 @dataclass(frozen=True)
@@ -1454,8 +1489,7 @@ class Input:
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
-    # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons |
-    # thermochem | surface_energy | qha | magnons | flapw | nmr
+    # one of module-level TASKS (the authoritative task-name registry above)
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state

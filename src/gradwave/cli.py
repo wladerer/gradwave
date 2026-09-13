@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -252,6 +253,125 @@ def _print_nmr(nmr: dict[str, Any]) -> int:
     return 0 if conv else 1
 
 
+def _fmt_scf(scf: dict[str, Any]) -> int:
+    e = scf["energies_eV"]
+    print(f"{'converged' if scf['converged'] else 'NOT CONVERGED'}: "
+          f"F = {e['free_energy']:.8f} eV ({scf['n_iter']} iterations)")
+    return 0 if scf["converged"] else 1
+
+
+def _fmt_relax(relax: dict[str, Any]) -> int:
+    # A relax that reaches the ionic-step limit still yields a valid trajectory
+    # and a usable last geometry, so exit 0 signals the run executed.
+    # Convergence is a quality flag carried by relax.converged.
+    print(f"{'converged' if relax['converged'] else 'NOT CONVERGED'}: "
+          f"E = {relax['energy_eV']:.8f} eV, fmax = "
+          f"{relax['fmax_eV_ang']:.4f} eV/Å ({relax['n_steps']} steps)")
+    return 0
+
+
+def _fmt_neb(neb: dict[str, Any]) -> int:
+    # Like relax: a run that hit the step limit still produced a usable MEP, so
+    # exit 0 signals execution; convergence rides in neb.converged.
+    print(f"{'converged' if neb['converged'] else 'NOT CONVERGED'}: "
+          f"NEB barrier E_a = {neb['barrier_eV']:.4f} eV (reverse "
+          f"{neb['reverse_barrier_eV']:.4f} eV, ΔE = "
+          f"{neb['reaction_energy_eV']:+.4f} eV, {neb['n_steps']} steps)")
+    return 0
+
+
+def _fmt_eos(eos: dict[str, Any]) -> int:
+    print(f"V0 = {eos['v0_ang3_per_atom']:.4f} Å³/atom, "
+          f"B0 = {eos['b0_GPa']:.2f} GPa, B0' = {eos['b0_prime']:.3f}")
+    return 0 if eos.get("all_converged", True) else 1
+
+
+def _fmt_elastic(elastic: dict[str, Any]) -> int:
+    print(f"K = {elastic['bulk_modulus_GPa']['hill']:.1f} GPa, "
+          f"G = {elastic['shear_modulus_GPa']['hill']:.1f} GPa, "
+          f"E = {elastic['young_modulus_GPa']:.1f} GPa, "
+          f"ν = {elastic['poisson_ratio']:.3f} "
+          f"({'stable' if elastic['mechanically_stable'] else 'UNSTABLE'})")
+    return 0 if elastic.get("all_converged", True) else 1
+
+
+def _fmt_surface_energy(surf: dict[str, Any]) -> int:
+    print(f"surface energy: γ = {surf['gamma_eV_ang2']:.6f} eV/Å² "
+          f"({surf['gamma_J_m2']:.4f} J/m²), "
+          f"E_bulk = {surf['e_bulk_eV_per_layer']:+.6f} eV/layer")
+    return 0 if surf.get("all_converged", True) else 1
+
+
+def _fmt_qha(qha: dict[str, Any]) -> int:
+    import numpy as np
+
+    t = qha["temperatures_K"]
+    v300 = float(np.interp(300.0, t, qha["volume_T_ang3"]))
+    print(f"qha: {len(qha['scales'])} volumes × {len(t)} T, "
+          f"V(300K) ≈ {v300:.4f} Å³")
+    return 0 if qha.get("all_converged", True) else 1
+
+
+def _fmt_phonons(phonons: dict[str, Any]) -> int:
+    fmin = phonons["min_frequency_cm1"]
+    print(f"phonons: {tuple(phonons['supercell'])} supercell, "
+          f"min ω = {fmin:.1f} cm⁻¹ "
+          f"({'all real' if fmin > -1.0 else 'IMAGINARY modes'})")
+    return 0 if fmin > -1.0 else 1
+
+
+def _fmt_flapw(flapw: dict[str, Any]) -> int:
+    span = flapw.get("band_span_eV")
+    print(f"{'converged' if flapw['converged'] else 'NOT CONVERGED'}: "
+          f"FLAPW SCF, {flapw.get('n_bands')} bands"
+          + (f", band span {span:.4f} eV" if span is not None else ""))
+    return 0 if flapw["converged"] else 1
+
+
+def _fmt_thermochem(thermochem: dict[str, Any]) -> int:
+    print(f"thermochem ({thermochem['mode']}): "
+          f"G = {thermochem['free_energy_eV']:+.6f} eV at "
+          f"{thermochem['temperature_K']:.2f} K")
+    return 0
+
+
+def _fmt_magnetism(mag: dict[str, Any]) -> int:
+    line = (f"magnetism: {mag['ordering']}, total moment "
+            f"{mag['total_moment_muB']:.4f} μB")
+    tc = mag.get("curie_temperature_mfa_K")
+    if tc is not None:
+        line += f", T_C(MFA) ≈ {tc} K"
+    print(line)
+    return 0
+
+
+def _fmt_magnons(magnons: dict[str, Any]) -> int:
+    print(f"magnons: {magnons['n_sublattices']} branch(es), "
+          f"ħω ∈ [{magnons['min_frequency_meV']:.3f}, "
+          f"{magnons['max_frequency_meV']:.3f}] meV")
+    return 0
+
+
+# summary-block key -> footer formatter (returns the process exit code). A run's
+# summary carries exactly one of these keys (bands/optics ride the "scf" block),
+# so the first present key wins; the order mirrors the historical if/elif chain.
+_RUN_FORMATTERS: dict[str, Callable[[dict[str, Any]], int]] = {
+    "scf": _fmt_scf,
+    "relax": _fmt_relax,
+    "neb": _fmt_neb,
+    "eos": _fmt_eos,
+    "elastic": _fmt_elastic,
+    "surface_energy": _fmt_surface_energy,
+    "qha": _fmt_qha,
+    "phonons": _fmt_phonons,
+    "flapw": _fmt_flapw,
+    "nmr": _print_nmr,
+    "thermochem": _fmt_thermochem,
+    "magnetism": _fmt_magnetism,
+    "magnons": _fmt_magnons,
+}
+
+
 def _maybe_relaunch_ranks(inp: Input) -> int | None:
     """Self-launch torchrun for ``distributed: N`` (int local-rank count).
 
@@ -333,72 +453,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             if "cuda_peak_alloc_gb" in proc:
                 foot += f" · CUDA peak {proc['cuda_peak_alloc_gb']:.2f} GB"
             print(foot)
-    scf = summary.get("scf")
-    if scf is not None:
-        e = scf["energies_eV"]
-        print(f"{'converged' if scf['converged'] else 'NOT CONVERGED'}: "
-              f"F = {e['free_energy']:.8f} eV ({scf['n_iter']} iterations)")
-        return 0 if scf["converged"] else 1
-    relax = summary.get("relax")
-    if relax is not None:
-        # A relax that reaches the ionic-step limit still yields a valid
-        # trajectory and a usable last geometry, so exit 0 signals the run
-        # executed. Convergence is a quality flag carried by relax.converged.
-        print(f"{'converged' if relax['converged'] else 'NOT CONVERGED'}: "
-              f"E = {relax['energy_eV']:.8f} eV, fmax = "
-              f"{relax['fmax_eV_ang']:.4f} eV/Å ({relax['n_steps']} steps)")
-        return 0
-    eos = summary.get("eos")
-    if eos is not None:
-        print(f"V0 = {eos['v0_ang3_per_atom']:.4f} Å³/atom, "
-              f"B0 = {eos['b0_GPa']:.2f} GPa, B0' = {eos['b0_prime']:.3f}")
-        return 0 if eos.get("all_converged", True) else 1
-    elastic = summary.get("elastic")
-    if elastic is not None:
-        print(f"K = {elastic['bulk_modulus_GPa']['hill']:.1f} GPa, "
-              f"G = {elastic['shear_modulus_GPa']['hill']:.1f} GPa, "
-              f"E = {elastic['young_modulus_GPa']:.1f} GPa, "
-              f"ν = {elastic['poisson_ratio']:.3f} "
-              f"({'stable' if elastic['mechanically_stable'] else 'UNSTABLE'})")
-        return 0 if elastic.get("all_converged", True) else 1
-    surf = summary.get("surface_energy")
-    if surf is not None:
-        print(f"surface energy: γ = {surf['gamma_eV_ang2']:.6f} eV/Å² "
-              f"({surf['gamma_J_m2']:.4f} J/m²), "
-              f"E_bulk = {surf['e_bulk_eV_per_layer']:+.6f} eV/layer")
-        return 0 if surf.get("all_converged", True) else 1
-    qha = summary.get("qha")
-    if qha is not None:
-        import numpy as np
-
-        t = qha["temperatures_K"]
-        v300 = float(np.interp(300.0, t, qha["volume_T_ang3"]))
-        print(f"qha: {len(qha['scales'])} volumes × {len(t)} T, "
-              f"V(300K) ≈ {v300:.4f} Å³")
-        return 0 if qha.get("all_converged", True) else 1
-    phonons = summary.get("phonons")
-    if phonons is not None:
-        fmin = phonons["min_frequency_cm1"]
-        print(f"phonons: {tuple(phonons['supercell'])} supercell, "
-              f"min ω = {fmin:.1f} cm⁻¹ "
-              f"({'all real' if fmin > -1.0 else 'IMAGINARY modes'})")
-        return 0 if fmin > -1.0 else 1
-    flapw = summary.get("flapw")
-    if flapw is not None:
-        span = flapw.get("band_span_eV")
-        print(f"{'converged' if flapw['converged'] else 'NOT CONVERGED'}: "
-              f"FLAPW SCF, {flapw.get('n_bands')} bands"
-              + (f", band span {span:.4f} eV" if span is not None else ""))
-        return 0 if flapw["converged"] else 1
-    nmr = summary.get("nmr")
-    if nmr is not None:
-        return _print_nmr(nmr)
-    thermochem = summary.get("thermochem")
-    if thermochem is not None:
-        print(f"thermochem ({thermochem['mode']}): "
-              f"G = {thermochem['free_energy_eV']:+.6f} eV at "
-              f"{thermochem['temperature_K']:.2f} K")
-        return 0
+    for key, fmt in _RUN_FORMATTERS.items():
+        block = summary.get(key)
+        if block is not None:
+            return fmt(block)
     return 0
 
 

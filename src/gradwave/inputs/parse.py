@@ -13,6 +13,8 @@ import yaml
 from ase import Atoms
 
 from gradwave.inputs.models import (
+    DISTRIBUTED_TASKS,
+    TASKS,
     BaderParams,
     BandCenterParams,
     BandsParams,
@@ -790,14 +792,16 @@ def _load_input(path: Path) -> Input:
             raw["pseudopotentials"], base, atoms.get_chemical_symbols())
 
     kp = raw.get("kpoints", {})
-    _check_keys("kpoints", kp, {"mesh", "shift", "kspacing"})
+    _check_keys("kpoints", kp, {f.name for f in dataclasses.fields(KPointsParams)})
     sm = raw.get("smearing", {})
-    _check_keys("smearing", sm, {"type", "width"})
+    _check_keys("smearing", sm, {f.name for f in dataclasses.fields(SmearingParams)})
     scf_raw = dict(raw.get("scf", {}))
-    _check_keys("scf", scf_raw,
-                {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
-                 "convergence", "entol", "eigensolver", "magnetic",
-                 "boundary", "esm_bias", "target_mu", "memory"})
+    # Derived from SCFParams' fields (guard against silent drift), with the one
+    # YAML/field rename: the `scf.diago` block (parsed to a nested {tol}) maps
+    # to the `diago_tol` field.
+    _scf_keys = {f.name for f in dataclasses.fields(SCFParams)} - {"diago_tol"}
+    _scf_keys.add("diago")
+    _check_keys("scf", scf_raw, _scf_keys)
     mix_raw = dict(scf_raw.pop("mixing", {}))
     mag_raw = dict(scf_raw.pop("magnetic", {}))
     _check_keys("scf.magnetic", mag_raw,
@@ -809,14 +813,9 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf.diago", diago, {"tol"})
 
     xc, hybrid = _resolve_xc(raw)
-    if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
-                    "elastic",
-                    "phonons", "thermochem", "surface_energy", "qha", "magnons",
-                    "flapw", "nmr"):
+    if task not in TASKS:
         raise InputError(
-            f"unknown task {task!r} "
-            f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | surface_energy | qha | magnons | flapw | nmr)")
+            f"unknown task {task!r} ({' | '.join(TASKS)})")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -882,12 +881,12 @@ def _load_input(path: Path) -> Input:
                 f"distributed: true is not supported with a hybrid functional "
                 f"(xc: {hybrid.name}) — the k-point-sharded SCF is wired for the "
                 f"collinear semilocal paths only (see docs/manual/distributed.md)")
-        if task not in ("scf", "bands", "relax", "eos"):
+        if task not in DISTRIBUTED_TASKS:
             raise InputError(
-                f"distributed: true is only wired for task: scf | bands | "
-                f"relax | eos (got task: {task!r}) — elastic/phonons/magnetism "
-                f"don't route through the k-point-sharded SCF path yet (see "
-                f"docs/manual/distributed.md)")
+                f"distributed: true is only wired for task: "
+                f"{' | '.join(DISTRIBUTED_TASKS)} (got task: {task!r}) — "
+                f"elastic/phonons/magnetism don't route through the "
+                f"k-point-sharded SCF path yet (see docs/manual/distributed.md)")
 
     # fixed spin moment: a collinear nspin=2 pin. Without smearing it is the
     # integer-occupation fill; with smearing the SCF solves two per-channel
