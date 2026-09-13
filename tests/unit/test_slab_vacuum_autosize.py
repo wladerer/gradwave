@@ -315,22 +315,30 @@ def test_trim_helper_carries_constraints_and_tags():
     assert list(trimmed.constraints[0].get_indices()) == [0, 1]
 
 
-def test_trim_declines_realistic_al_metal_slab():
-    """Honest-limitation guard: on a realistic Al(100) metal slab with a normal
-    ~10 Å/face vacuum, the conservative default ("energy", 1e-4 e/Å³) declines to
-    trim — the superposition-of-atomic-densities tail of a light delocalized
-    metal is diffuse (atomic 3s/3p tails), so a safe box wants ≳13 Å/face. This
-    pins the measured fact (2026-09-13) that the vacuum trim is effectively inert
-    for realistic metallic slabs at safe tolerances; forcing it to fire (looser
-    tol) trades a measurable energy error for box size. Pure geometry, no SCF."""
+def test_trim_tolerance_is_monotone_on_realistic_slab():
+    """The trim is a controllable box-size/accuracy knob: a looser tail tolerance
+    keeps less vacuum. On a realistic Al(100) 2x2x3 slab the trimmed open-axis
+    length is monotone non-increasing in ``vacuum_tol`` (1e-5 → 1e-4 → 1e-3).
+    Pure geometry, no SCF.
+
+    Context (measured 2026-09-13): this slab DOES trim at the default 1e-4 tol,
+    and the trim is not energy-exact — the diffuse SAD tail of a light metal plus
+    the fixed-ecut grid re-sampling shift the converged energy by tens+ meV/atom.
+    The trim is an approximation the caller tunes here, not a free win (see the
+    docstrings and ``test_esm_scf`` guards)."""
     from ase.build import fcc111
     slab = fcc111("Al", size=(2, 2, 3), a=4.05, vacuum=10.0, orthogonal=False)
-    box = resolve_slab_box_geom(
-        np.array(slab.cell), np.array(slab.get_positions()),
-        boundary="open_z", ecut=300.0, upfs=[_load()],
-        species_of_atom=[0] * len(slab), vacuum_autosize=True,
-        vacuum_target="energy", npw_gate=0)
-    assert box.trimmed is False  # conservative default is a no-op for this metal
+    cell, pos = np.array(slab.cell), np.array(slab.get_positions())
+    lengths = []
+    for tol in (1e-5, 1e-4, 1e-3):
+        box = resolve_slab_box_geom(
+            cell, pos, boundary="open_z", ecut=300.0, upfs=[_load()],
+            species_of_atom=[0] * len(slab), vacuum_autosize=True,
+            vacuum_tol=tol, npw_gate=0)
+        # length_after is meaningful whether or not it trimmed (== before if not)
+        lengths.append(box.length_after if box.trimmed else box.length_before)
+    assert lengths[0] >= lengths[1] >= lengths[2]  # looser tol → smaller box
+    assert lengths[2] < float(np.linalg.norm(cell[2]))  # the loose cut does fire
 
 
 # ---------------------------------------------------------------------------

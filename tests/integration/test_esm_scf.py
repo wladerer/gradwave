@@ -132,9 +132,9 @@ def test_open_z_vacuum_trim_energy_shift_is_measurable_not_exact():
     "exact": if this assertion starts finding ΔE ≈ 0 for a large box change, the
     physics changed and the docs/claims must be revisited.
 
-    (The conservative default declines to trim a realistic Al metal slab at all —
-    see ``test_slab_vacuum_autosize.test_trim_declines_realistic_al_metal_slab``.
-    This test deliberately forces an aggressive trim to exhibit the error.)"""
+    (``test_slab_vacuum_autosize.test_trim_tolerance_is_monotone_on_realistic_slab``
+    characterises the tol→box knob on a realistic slab. This test deliberately
+    forces an aggressive trim to exhibit the resulting energy error.)"""
     al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
     a = 4.05 / np.sqrt(2.0)
     cell = np.diag([a, a, 30.0])
