@@ -187,6 +187,68 @@ def _born_charges(system: System, grid: FFTGrid, vol: float,
     return born
 
 
+def _field_response(
+    *,
+    solve_step: Callable[[int, torch.Tensor, Any], tuple[Any, Any, torch.Tensor]],
+    u_update: Callable[[Any], torch.Tensor],
+    verbose_line: Callable[[int, torch.Tensor], str] | None,
+    u_flat: torch.Tensor,
+    init_state: Any,
+    history: int,
+    beta: float,
+    outer_tol: float,
+    max_outer: int,
+    label: object,
+) -> tuple[Any, Any, torch.Tensor]:
+    """Anderson fixed-point driver shared by the E-field DFPT screening solves.
+
+    The outer self-consistency loop is byte-identical across the scalar
+    (``dielectric_born`` full-mesh branch), collinear-spin
+    (``_dielectric_born_spin``), spinor/SOC (``_dielectric_born_soc``) and
+    IBZ-symmetrized (``_field_response_symmetrized``) paths: build an
+    ``AndersonMixer``, iterate up to ``max_outer`` times, converge on the max
+    change of the ε column, and raise if it never converges. The parts that
+    genuinely differ are injected as hooks, exactly as ``_born_charges`` injects
+    ``nonlocal_t``:
+
+    - ``solve_step(it, u_flat, state) -> (state, drho, col)`` builds the RHS
+      (the E-probe seed −ξ plus, for ``it > 1``, the −P_c[ψ·u] screening term),
+      runs the conduction-projected Sternheimer solve, reduces the density
+      response ``drho`` (each path with its OWN prefactor and reduction axes:
+      f=2 → 4, spinor/collinear f=1 → 2; the spinor path sums the extra
+      component axis) and forms the ε column/matrix ``col``. ``state`` (the
+      warm-started Δψ, a tensor or per-channel list) threads across iterations.
+    - ``u_update(drho) -> u_new`` applies K_Hxc (with each path's prefactors,
+      and for the symmetrized path the polar-vector fold) to produce the new
+      screening field; the shared ``mixer.step(u_flat, u_new − u_flat)`` is
+      identical everywhere.
+    - ``verbose_line(it, col)`` renders the optional per-iteration trace (its
+      prefactor/format differs per path — 16π vs 8π, column vs diagonal);
+      ``None`` disables it.
+
+    Returns the converged ``(state, drho, col)`` from the breaking iteration.
+    Numerically identical to the four inlined loops it replaces: the same ops
+    in the same order, only the mixer/convergence/raise boilerplate is shared.
+    """
+    mixer = AndersonMixer(history, beta)
+    col_prev: torch.Tensor | None = None
+    state: Any = init_state
+    drho: Any = None
+    col: torch.Tensor | None = None
+    for it in range(1, max_outer + 1):
+        state, drho, col = solve_step(it, u_flat, state)
+        if verbose_line is not None:
+            print(verbose_line(it, col))
+        if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
+            break
+        col_prev = col.clone()
+        u_flat = mixer.step(u_flat, u_update(drho) - u_flat)
+    else:
+        raise RuntimeError(f"E-field response ({label}) not converged")
+    assert col is not None
+    return state, drho, col
+
+
 @torch.no_grad()
 def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | NoncollinearXC, *,
                     dk: float = 1e-3, cg_tol: float = 1e-9,
@@ -315,11 +377,8 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
         dpsi_all, drho_all = [], []
         for b_dir in range(3):
             # Anderson-accelerated fixed point on u = K_Hxc[Δρ(E-probe + u)]
-            u_flat = torch.zeros(n_pts, dtype=RDTYPE, device=c_occ.device)
-            mixer = AndersonMixer(history, beta)
-            dpsi = torch.zeros_like(c_occ)
-            col_prev = None
-            for it in range(1, max_outer + 1):
+            # (shared driver _field_response; f=2 → prefactors 4 on Δρ, 16π on ε).
+            def _solve_step(it, u_flat, dpsi, b_dir=b_dir):
                 rhs = -xi[b_dir]
                 if it > 1:
                     u_r = u_flat.reshape(grid.shape)
@@ -332,16 +391,21 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                     float((kw[:, None] * torch.einsum(
                         "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
                     for a in range(3)], dtype=RDTYPE)
-                if verbose:
-                    print(f"  E{b_dir} it {it:3d}: eps col = "
-                          f"{[round(1 - 16 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
-                if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
-                    break
-                col_prev = col
-                r_vec = _k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
-                u_flat = mixer.step(u_flat, r_vec)
-            else:
-                raise RuntimeError(f"E-field response ({b_dir}) not converged")
+                return dpsi, drho, col
+
+            def _u_update(drho):
+                return _k_hxc(res, xc, drho).reshape(-1).to(c_occ.device)
+
+            def _vline(it, col, b_dir=b_dir):
+                return (f"  E{b_dir} it {it:3d}: eps col = "
+                        f"{[round(1 - 16 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
+
+            dpsi, drho, col = _field_response(
+                solve_step=_solve_step, u_update=_u_update,
+                verbose_line=(_vline if verbose else None),
+                u_flat=torch.zeros(n_pts, dtype=RDTYPE, device=c_occ.device),
+                init_state=torch.zeros_like(c_occ), history=history, beta=beta,
+                outer_tol=outer_tol, max_outer=max_outer, label=b_dir)
             dpsi_all.append(dpsi)
             drho_all.append(drho)
             eps_mat[:, b_dir] = 1.0 * torch.eye(3, dtype=RDTYPE)[:, b_dir] \
@@ -418,13 +482,13 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
     tensor sums, whose star reconstruction the caller applies."""
     from gradwave.core.batch import box_to_sphere_b
 
-    u_flat = torch.zeros(3 * n_pts, dtype=RDTYPE, device=c_occ.device)
-    mixer = AndersonMixer(history, beta)
-    dpsi = [torch.zeros_like(c_occ) for _ in range(3)]
+    # drho_raw / col_mat persist across iterations (the solve_step hook mutates
+    # them in place); col_mat's in-place fill is why the shared driver clones
+    # col before the convergence compare.
     drho_raw: list[torch.Tensor | None] = [None, None, None]
     col_mat = torch.zeros(3, 3, dtype=RDTYPE)
-    col_prev = None
-    for it in range(1, max_outer + 1):
+
+    def _solve_step(it, u_flat, dpsi):
         for b in range(3):
             rhs = -xi[b]
             if it > 1:
@@ -439,25 +503,31 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
             for a in range(3):
                 col_mat[a, b] = float((kw[:, None] * torch.einsum(
                     "kbg,kbg->kb", xi[a].conj(), dpsi[b]).real).sum())
-        if verbose:
-            diag = [round(1 - 16 * math.pi * E2 / vol * float(col_mat[a, a]), 6)
-                    for a in range(3)]
-            print(f"  sym it {it:3d}: raw eps diag = {diag}")
-        if col_prev is not None and float((col_mat - col_prev).abs().max()) < outer_tol:
-            break
-        col_prev = col_mat.clone()
+        return dpsi, drho_raw, col_mat
+
+    def _u_update(drho_raw_arg):
         # full-BZ screening: fold the polar vector response, then K_Hxc per dir
         # every element of drho_raw is reassigned each outer iteration (the
         # `for b in range(3)` loop above runs unconditionally), so none are
         # still the pre-loop `None` placeholder here.
-        drho_raw_real = cast("list[torch.Tensor]", drho_raw)
+        drho_raw_real = cast("list[torch.Tensor]", drho_raw_arg)
         drho_sym = _symmetrize_drho_vec(vsym, drho_raw_real)
-        u_new = torch.cat([_k_hxc(res, xc, drho_sym[b]).reshape(-1)
-                           for b in range(3)]).to(u_flat.device)
-        u_flat = mixer.step(u_flat, u_new - u_flat)
-    else:
-        raise RuntimeError("E-field response (symmetrized) not converged")
-    return dpsi, cast("list[torch.Tensor]", drho_raw), col_mat
+        return torch.cat([_k_hxc(res, xc, drho_sym[b]).reshape(-1)
+                          for b in range(3)]).to(c_occ.device)
+
+    def _vline(it, col):
+        diag = [round(1 - 16 * math.pi * E2 / vol * float(col[a, a]), 6)
+                for a in range(3)]
+        return f"  sym it {it:3d}: raw eps diag = {diag}"
+
+    dpsi, drho_raw_out, col_mat_out = _field_response(
+        solve_step=_solve_step, u_update=_u_update,
+        verbose_line=(_vline if verbose else None),
+        u_flat=torch.zeros(3 * n_pts, dtype=RDTYPE, device=c_occ.device),
+        init_state=[torch.zeros_like(c_occ) for _ in range(3)],
+        history=history, beta=beta, outer_tol=outer_tol, max_outer=max_outer,
+        label="symmetrized")
+    return dpsi, cast("list[torch.Tensor]", drho_raw_out), col_mat_out
 
 
 def _k_hxc(res: SCFResult, xc: XCFunctional, drho: torch.Tensor) -> torch.Tensor:
@@ -548,11 +618,8 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
     drho_tot_all = []            # total Δρ per field direction (Born local part)
     for b_dir in range(3):
         # Anderson fixed point on the two-channel screening field u = (u↑, u↓)
-        u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE, device=c_occ[0].device)
-        mixer = AndersonMixer(history, beta)
-        dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(2)]
-        col_prev = None
-        for it in range(1, max_outer + 1):
+        # (shared driver _field_response; f=1 per channel → 2 on Δρ, 8π on ε).
+        def _solve_step(it, u_flat, dpsi, b_dir=b_dir):
             drho = []
             for sp in range(2):
                 rhs = -xi[sp][b_dir]
@@ -573,17 +640,23 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
                         "kbg,kbg->kb", xi[sp][a].conj(), dpsi[sp]).real).sum()
                     for sp in range(2)))
                 for a in range(3)], dtype=RDTYPE)
-            if verbose:
-                print(f"  E{b_dir} it {it:3d}: eps col = "
-                      f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
-            if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
-                break
-            col_prev = col
+            return dpsi, drho, col
+
+        def _u_update(drho):
             du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
-            r_vec = torch.cat([du.reshape(-1), dd.reshape(-1)]) - u_flat
-            u_flat = mixer.step(u_flat, r_vec)
-        else:
-            raise RuntimeError(f"E-field response ({b_dir}) not converged")
+            return torch.cat([du.reshape(-1), dd.reshape(-1)])
+
+        def _vline(it, col, b_dir=b_dir):
+            return (f"  E{b_dir} it {it:3d}: eps col = "
+                    f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
+
+        dpsi, drho, col = _field_response(
+            solve_step=_solve_step, u_update=_u_update,
+            verbose_line=(_vline if verbose else None),
+            u_flat=torch.zeros(2 * n_pts, dtype=RDTYPE, device=c_occ[0].device),
+            init_state=[torch.zeros_like(c_occ[sp]) for sp in range(2)],
+            history=history, beta=beta, outer_tol=outer_tol, max_outer=max_outer,
+            label=b_dir)
         for sp in range(2):
             dpsi_all[sp].append(dpsi[sp])
         drho_tot_all.append(drho[0] + drho[1])
@@ -798,11 +871,8 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
     dpsi_all, drho_all = [], []
     for b_dir in range(3):
         # Anderson-accelerated fixed point on u = K_Hxc[Δρ(E-probe + u)]
-        u_flat = torch.zeros(n_pts, dtype=RDTYPE, device=dev)
-        mixer = AndersonMixer(history, beta)
-        dpsi = torch.zeros_like(c_occ)
-        col_prev = None
-        for it in range(1, max_outer + 1):
+        # (shared driver _field_response; spinor f=1 → 2 on Δρ, 8π on ε).
+        def _solve_step(it, u_flat, dpsi, b_dir=b_dir):
             rhs = -xi[b_dir]
             if it > 1:
                 # the screening field u couples to the DENSITY only (b_xc ≡ 0
@@ -821,16 +891,21 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
                 float((kw[:, None] * torch.einsum(
                     "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
                 for a in range(3)], dtype=RDTYPE)
-            if verbose:
-                print(f"  E{b_dir} it {it:3d}: eps col = "
-                      f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
-            if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
-                break
-            col_prev = col
-            r_vec = _k_hxc_soc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
-            u_flat = mixer.step(u_flat, r_vec)
-        else:
-            raise RuntimeError(f"E-field response ({b_dir}) not converged")
+            return dpsi, drho, col
+
+        def _u_update(drho):
+            return _k_hxc_soc(res, xc, drho).reshape(-1).to(dev)
+
+        def _vline(it, col, b_dir=b_dir):
+            return (f"  E{b_dir} it {it:3d}: eps col = "
+                    f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
+
+        dpsi, drho, col = _field_response(
+            solve_step=_solve_step, u_update=_u_update,
+            verbose_line=(_vline if verbose else None),
+            u_flat=torch.zeros(n_pts, dtype=RDTYPE, device=dev),
+            init_state=torch.zeros_like(c_occ), history=history, beta=beta,
+            outer_tol=outer_tol, max_outer=max_outer, label=b_dir)
         dpsi_all.append(dpsi)
         drho_all.append(drho)
         eps_mat[:, b_dir] = 1.0 * torch.eye(3, dtype=RDTYPE)[:, b_dir] \
