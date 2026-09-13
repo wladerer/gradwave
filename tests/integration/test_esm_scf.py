@@ -120,6 +120,42 @@ def test_open_z_al_slab_scf_runs_clean():
 
 
 @pytest.mark.standard
+def test_open_z_energy_invariant_to_vacuum_trim():
+    """The vacuum auto-trim is exact: an Al ESM slab in a tall box and in a box
+    trimmed to the SAD density tail converge to the same total energy (to the
+    tail tolerance + grid re-sampling). This is the physical basis of
+    ``api.trim_slab_vacuum`` / ``slab.vacuum_autosize`` — ESM makes the open-axis
+    electrostatics box-independent, so shrinking the empty vacuum only removes
+    plane waves and FFT-box length, not physics."""
+    from gradwave.api._slab import _npw_estimate, resolve_slab_box_geom
+
+    al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
+    a = 4.05 / np.sqrt(2.0)
+    cell = np.diag([a, a, 30.0])  # deliberately wasteful vacuum
+    pos = np.array([[0.0, 0.0, 13.0], [0.0, 0.0, 15.0], [0.0, 0.0, 17.0]])
+    common = dict(smearing="gaussian", width=0.2, etol=1e-7, rhotol=1e-6,
+                  max_iter=120, verbose=False)
+
+    res_full = scf(setup_system(cell, pos, [0, 0, 0], [al], ecut=20 * RY),
+                   LDA_PW92(), boundary="open_z", **common)
+
+    box = resolve_slab_box_geom(
+        cell, pos, boundary="open_z", ecut=20 * RY, upfs=[al],
+        species_of_atom=[0, 0, 0], vacuum_autosize=True, vacuum_target="energy",
+        npw_gate=0)
+    assert box.trimmed and box.length_after < 30.0
+    res_trim = scf(setup_system(box.cell, box.positions, [0, 0, 0], [al],
+                                ecut=20 * RY),
+                   LDA_PW92(), boundary="open_z", **common)
+
+    assert res_full.converged and res_trim.converged
+    # box shrank substantially yet the energy is unchanged (tail + grid noise)
+    assert box.npw_estimate > _npw_estimate(box.cell, 20 * RY)
+    assert float(res_trim.energies.total) == pytest.approx(
+        float(res_full.energies.total), abs=1e-2)
+
+
+@pytest.mark.standard
 def test_open_z_metal_capacitor_scf_and_bias():
     """The metal/capacitor mode (boundary=open_z_metal) runs end-to-end: the SCF
     converges, the loop ΔE matches the standalone capacitor energy on the
