@@ -315,6 +315,24 @@ def test_trim_helper_carries_constraints_and_tags():
     assert list(trimmed.constraints[0].get_indices()) == [0, 1]
 
 
+def test_trim_declines_realistic_al_metal_slab():
+    """Honest-limitation guard: on a realistic Al(100) metal slab with a normal
+    ~10 Å/face vacuum, the conservative default ("energy", 1e-4 e/Å³) declines to
+    trim — the superposition-of-atomic-densities tail of a light delocalized
+    metal is diffuse (atomic 3s/3p tails), so a safe box wants ≳13 Å/face. This
+    pins the measured fact (2026-09-13) that the vacuum trim is effectively inert
+    for realistic metallic slabs at safe tolerances; forcing it to fire (looser
+    tol) trades a measurable energy error for box size. Pure geometry, no SCF."""
+    from ase.build import fcc111
+    slab = fcc111("Al", size=(2, 2, 3), a=4.05, vacuum=10.0, orthogonal=False)
+    box = resolve_slab_box_geom(
+        np.array(slab.cell), np.array(slab.get_positions()),
+        boundary="open_z", ecut=300.0, upfs=[_load()],
+        species_of_atom=[0] * len(slab), vacuum_autosize=True,
+        vacuum_target="energy", npw_gate=0)
+    assert box.trimmed is False  # conservative default is a no-op for this metal
+
+
 # ---------------------------------------------------------------------------
 def _load():
     from gradwave.pseudo.upf import parse_upf

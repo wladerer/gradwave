@@ -1,32 +1,46 @@
 """Density-tail vacuum auto-sizer for open-boundary (ESM) slabs.
 
 ESM (``boundary="open_z"`` / ``"open_z_metal"``) makes the open-axis
-electrostatics box-independent: the vacuum no longer has to be wide enough to
-*decouple periodic images*, only wide enough to *hold the physical density
-tail*. A habitual 10–20 Å/face of vacuum is then pure waste. Trimming the open
-(c) axis to just the SAD density tail plus a margin cuts **both** the FFT box
-length ``Nz`` and the plane-wave count ``npw`` — both scale ~linearly with the
-open-axis length ``L_z`` (``grids.build_fft_grid`` sizes each dimension from the
-Miller extent of the density sphere; ``build_gsphere`` keeps ``|k+G|² ≤ ecut``,
-whose count is ``∝ Ω``) — so the FFT H-apply and the O(nb²·npw) Rayleigh–Ritz
-shrink together.
+electrostatics box-independent *only where the density has genuinely decayed to
+zero at the box edge* — the open 1D Green's function is applied at the boundary
+planes, so if real charge still sits there the open-vs-periodic split is wrong
+and the total energy shifts. The vacuum therefore has to be wide enough to hold
+the physical density tail; a habitual 10–20 Å/face is often more than that, and
+the excess is FFT/plane-wave waste. Trimming the open (c) axis toward the SAD
+density tail cuts **both** the FFT box length ``Nz`` and the plane-wave count
+``npw`` — both scale ~linearly with the open-axis length ``L_z``
+(``grids.build_fft_grid`` sizes each dimension from the Miller extent of the
+density sphere; ``build_gsphere`` keeps ``|k+G|² ≤ ecut``, whose count is
+``∝ Ω``) — so the FFT H-apply and the O(nb²·npw) Rayleigh–Ritz shrink together.
+
+**This is a controllable approximation, not an exact transform.** The trim
+boundary is placed where the *SAD* (superposition-of-atomic) planar density
+falls below ``vacuum_tol``. SAD tails are diffuse (isolated-atom valence
+orbitals extend far), so the mapping from ``vacuum_tol`` to a safe box is
+material-dependent and *measured*, not free: on an Al slab, trimming to a
+``~2×`` npw cut costs on the order of tens of meV/atom, and more aggressive cuts
+cost hundreds of meV/atom to > 1 eV (they move the ESM boundary into non-zero
+density). The energy error must be characterised per material; the caller trades
+box size against accuracy through ``vacuum_tol``. The default (see
+``_TARGET_DEFAULTS``) is deliberately conservative so it declines to trim rather
+than corrupt the energy — for a light delocalised metal like Al it is often a
+near no-op.
 
 The box is a **forward hyperparameter** — set once, before any SCF step, and
-frozen for the whole solve, exactly like ``ecut``. The vacuum-normal stress is
-physically meaningless for a slab, so there is no autograd interaction: no
-mid-SCF basis change, no adjoint coupling. This module resolves the trimmed
-``(cell, positions)`` from a superposition-of-atomic-densities (SAD) profile —
-no SCF is run.
+frozen for the whole solve, like ``ecut``. The vacuum-normal stress is
+physically meaningless for a slab, so there is no autograd interaction. This
+module resolves the trimmed ``(cell, positions)`` from the SAD profile — no SCF
+is run.
 
 Two disciplines set the margin, keyed to the requested observable:
 
-* **energy / forces** are *tail-limited* — the total energy stops moving once
-  the density that spills into the vacuum is captured, so an aggressive
-  ``ρ < ~1e-4 e/Å³`` cut with a thin margin suffices.
-* **work function / dipole** are *plateau-limited* — ``postscf.work_function.
-  vacuum_level`` reads ``v_eff`` on the lowest-density open-axis planes and
-  needs a flat vacuum plateau there, so the margin is larger (a conservative
-  default).
+* **energy / forces** — a ``ρ < 1e-4 e/Å³`` cut with a thin margin. Conservative
+  in tail *location* (SAD overestimates the tail), but note the caveat above:
+  actually reaching a box that saves plane waves needs a looser cut, which is
+  where the energy error appears.
+* **work function / dipole** — ``postscf.work_function.vacuum_level`` reads
+  ``v_eff`` on the lowest-density open-axis planes and needs a flat vacuum
+  plateau, so the margin is larger (the conservative default).
 
 Gates (a slab satisfies them, a small bulk-ish cell does not): only trim when
 the run is arithmetic-bound (``npw ≳ npw_gate``) and genuinely vacuum-dominated

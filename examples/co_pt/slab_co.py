@@ -68,12 +68,16 @@ def co_molecule():
 
 
 def _trim(slab):
-    """Shrink the (generous) vacuum to the SAD density tail under open_z (ESM).
+    """Shrink the (generous) vacuum toward the SAD density tail under open_z (ESM).
 
-    ESM makes the vacuum-normal electrostatics box-independent, so the 7.5 Å/face
-    built above is mostly FFT/plane-wave waste. Trimming to the tail (exact to
-    ~1e-4 e/Å³) cuts Nz and npw before any SCF, and the cell stays fixed for the
-    whole rigid-substrate relaxation. No-op if the boundary gate/size gate fail."""
+    ESM's open-axis electrostatics are box-independent where the density has
+    decayed to ~0 at the edge, so vacuum beyond the physical tail is FFT/plane-wave
+    waste. The trim is a *controllable approximation*, not free: at the
+    conservative default it may decline to trim (Pt's semicore density is more
+    compact than Al's, so it can trim more), and a looser vacuum_tol trades box
+    size for a measurable energy shift — validate before trusting an aggressive
+    cut. The cell stays fixed for the rigid-substrate relaxation; no-op if a gate
+    fails."""
     return trim_slab_vacuum(slab, PSEUDOS, ECUT, boundary="open_z", target="energy")
 
 

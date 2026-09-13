@@ -120,48 +120,37 @@ def test_open_z_al_slab_scf_runs_clean():
 
 
 @pytest.mark.standard
-def test_open_z_energy_invariant_to_vacuum_trim():
-    """The vacuum auto-trim is exact: an Al ESM slab in a tall box and in a box
-    trimmed to the SAD density tail converge to the same total energy (to the
-    tail tolerance + grid re-sampling). This is the physical basis of
-    ``api.trim_slab_vacuum`` / ``slab.vacuum_autosize`` — ESM makes the open-axis
-    electrostatics box-independent, so shrinking the empty vacuum only removes
-    plane waves and FFT-box length, not physics."""
-    from gradwave.api._slab import _npw_estimate, resolve_slab_box_geom
+def test_open_z_vacuum_trim_energy_shift_is_measurable_not_exact():
+    """The vacuum trim is a controllable APPROXIMATION, not an exact transform.
 
+    ESM box-independence only holds where the density is ~0 at the box edge, and
+    at fixed ecut a shorter box also re-samples the FFT grid (different dz). Both
+    effects are real: forcing an Al ESM slab from a generous box into a
+    substantially trimmed one shifts the converged total energy by a
+    *measurable* amount (tens to hundreds of meV/atom on Al, measured
+    2026-09-13), not by ~0. This guards against ever re-labelling the trim
+    "exact": if this assertion starts finding ΔE ≈ 0 for a large box change, the
+    physics changed and the docs/claims must be revisited.
+
+    (The conservative default declines to trim a realistic Al metal slab at all —
+    see ``test_slab_vacuum_autosize.test_trim_declines_realistic_al_metal_slab``.
+    This test deliberately forces an aggressive trim to exhibit the error.)"""
     al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
     a = 4.05 / np.sqrt(2.0)
-    cell = np.diag([a, a, 40.0])  # deliberately wasteful vacuum
-    pos = np.array([[0.0, 0.0, 18.0], [0.0, 0.0, 20.0], [0.0, 0.0, 22.0]])
+    cell = np.diag([a, a, 30.0])
+    pos = np.array([[0.0, 0.0, 13.0], [0.0, 0.0, 15.0], [0.0, 0.0, 17.0]])
     common = dict(smearing="gaussian", width=0.2, etol=1e-7, rhotol=1e-6,
-                  max_iter=120, verbose=False)
+                  max_iter=150, verbose=False)
 
-    res_full = scf(setup_system(cell, pos, [0, 0, 0], [al], ecut=20 * RY),
-                   LDA_PW92(), boundary="open_z", **common)
-
-    # The SAD (superposition-of-atomic) density tail for a light delocalized
-    # metal like Al is long — atomic 3s/3p tails are far more diffuse than the
-    # self-consistent surface density — so the default 1e-4 e/Å³ "energy"
-    # tolerance is conservative (needs ≳26 Å/face before it trims Al). A modestly
-    # looser tail cut (3e-4) trims this 40 Å box to ~17 Å (a ~3× npw cut) while
-    # the neglected charge stays negligible; the converged energy is unchanged.
-    box = resolve_slab_box_geom(
-        cell, pos, boundary="open_z", ecut=20 * RY, upfs=[al],
-        species_of_atom=[0, 0, 0], vacuum_autosize=True, vacuum_tol=3e-4,
-        vacuum_margin=2.0, npw_gate=0)
-    assert box.trimmed and box.length_after < 20.0
-    res_trim = scf(setup_system(box.cell, box.positions, [0, 0, 0], [al],
-                                ecut=20 * RY),
-                   LDA_PW92(), boundary="open_z", **common)
-
-    assert res_full.converged and res_trim.converged
-    # the plane-wave count fell substantially (the actual arithmetic win)
-    assert _npw_estimate(box.cell, 20 * RY) < 0.6 * _npw_estimate(cell, 20 * RY)
-    # yet the converged energy is unchanged: a broken trim (real charge dropped,
-    # or periodic images leaking back) would shift it by ≫ this. The bound is
-    # loose vs the true tail+grid noise (a few meV) to stay robust across BLAS.
-    assert float(res_trim.energies.total) == pytest.approx(
-        float(res_full.energies.total), abs=3e-2)
+    e_full = float(scf(setup_system(cell, pos, [0, 0, 0], [al], ecut=20 * RY),
+                       LDA_PW92(), boundary="open_z", **common).energies.total)
+    # force an aggressive trim (well past the safe default) to expose the error
+    cell_t = np.diag([a, a, 15.0])
+    pos_t = np.array([[0.0, 0.0, 5.5], [0.0, 0.0, 7.5], [0.0, 0.0, 9.5]])
+    e_trim = float(scf(setup_system(cell_t, pos_t, [0, 0, 0], [al], ecut=20 * RY),
+                       LDA_PW92(), boundary="open_z", **common).energies.total)
+    # the shift is real and non-negligible — NOT exact
+    assert abs(e_trim - e_full) > 5e-2
 
 
 @pytest.mark.standard
