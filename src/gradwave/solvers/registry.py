@@ -126,6 +126,8 @@ def davidson_adapter(
     force_dim_factor: int | None = None,
     subspace_budget_gb: float | None = None,
     subspace_storage: str | None = None,
+    n_gate: int | None = None,
+    n_add_cap: int | None = None,
     **kw: Any,
 ) -> EigResult:
     """Batched block Davidson — the baseline. `precond` is the kinetic diagonal
@@ -141,6 +143,8 @@ def davidson_adapter(
         force_dim_factor=force_dim_factor,
         subspace_budget_gb=subspace_budget_gb,
         subspace_storage=subspace_storage,
+        n_gate=n_gate,
+        n_add_cap=n_add_cap,
     )
     return EigResult(
         r.eigenvalues, r.eigenvectors, r.n_iter, r.residual_norms,

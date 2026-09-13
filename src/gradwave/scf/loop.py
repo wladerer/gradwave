@@ -2373,6 +2373,29 @@ def scf(
     # (QE wfc-extrapolation analogue) when start_from carries compatible ones
     coeffs_b_s = _seed_orbitals(nk, nb, bk, nspin, device, start_from)
 
+    # --- perf-survivors probe knobs (default off; env read per scf() call) ---
+    # GRADWAVE_RITZ_TAIL=<int>: carry <int> extra Ritz vectors across outer
+    # iterations as seed-buffer bands (solver gates on the lowest nb only —
+    # see davidson_batched's n_gate). Eager all-k Davidson path only.
+    # GRADWAVE_CHORD_TAIL=<float>: once the density residual is below
+    # <float>·rhotol, cap the eigensolve at one Rayleigh-Ritz round (chord /
+    # frozen-C tail probe); convergence is never accepted off a chorded solve
+    # — a full solve is forced first.
+    ritz_tail = int(os.environ.get("GRADWAVE_RITZ_TAIL", "0") or 0)
+    tail_s: list[torch.Tensor] | None = None
+    if (ritz_tail > 0 and gamma_gb is None and k_par_res is None
+            and k_chunk_res is None and not mixed_precision
+            and dist_ctx is None and eigensolver == "davidson"):
+        _gen = torch.Generator(device="cpu").manual_seed(nb + 15485863)
+        _pad = torch.view_as_complex(
+            torch.randn(nk, ritz_tail, bk.mask.shape[1], 2,
+                        generator=_gen, dtype=torch.float64)
+        ).to(device).to(CDTYPE) * bk.mask[:, None, :]
+        tail_s = [_pad.clone() for _ in range(nspin)]
+    chord_mult = float(os.environ.get("GRADWAVE_CHORD_TAIL", "0") or 0.0)
+    chord_force_full = False
+    chord_last = False
+
     e_free_prev, converged, history = None, False, []
     # Bound before the loop purely so ty can see these names as always defined
     # after it (the loop runs `for it in range(1, max_iter + 1)`, and max_iter
@@ -2479,6 +2502,16 @@ def scf(
         use_low = mixed_precision and tol_eff > mp_crossover
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
+        # chord/frozen-C tail probe (GRADWAVE_CHORD_TAIL, default off): one
+        # Rayleigh-Ritz round instead of a full eigensolve once the density
+        # residual is deep in the mixing-limited tail.
+        chord_now = (chord_mult > 0.0 and bool(history)
+                     and history[-1]["res"] < chord_mult * rhotol
+                     and not chord_force_full)
+        chord_force_full = False
+        chord_last = chord_now
+        solver_kw_it = ({**(solver_kw or {}), "max_iter": 1}
+                        if chord_now else solver_kw)
         # DFT+U U-ramp factor for THIS iteration; 1.0 when the ramp is off. The
         # same u_scale scales the V_U D-matrix (here) and the E_U energy
         # (_hubbard_occ_update below), so energy and potential stay at one U.
@@ -2528,14 +2561,21 @@ def scf(
                     u_scale,
                     k_par_res,
                     k_chunk_res or 1,
-                    solver_kw,
+                    solver_kw_it,
                 )
             elif k_chunk_res is None:
                 # all-k batched solve (default): the resident subspace is nk·m·npw.
                 mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
-                eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
+                _coeffs_in = coeffs_b_s[sp]
+                _kw_it = solver_kw_it
+                if tail_s is not None:
+                    # thick-Ritz-buffer probe: seed the solve with the carried
+                    # buffer rows; gate/return contract is the lowest nb.
+                    _coeffs_in = torch.cat([coeffs_b_s[sp], tail_s[sp]], dim=1)
+                    _kw_it = {**(solver_kw_it or {}), "n_gate": nb}
+                _eigs_full, _c_full = _solve_bands(
                     veff_s[sp],
-                    coeffs_b_s[sp],
+                    _coeffs_in,
                     bk,
                     grid.shape,
                     projs_b,
@@ -2552,8 +2592,13 @@ def scf(
                     t_solve,
                     device,
                     u_scale,
-                    solver_kw,
+                    _kw_it,
                 )
+                if tail_s is not None:
+                    tail_s[sp] = _c_full[:, nb:]
+                    eigs_s[sp], coeffs_b_s[sp] = _eigs_full[:, :nb], _c_full[:, :nb]
+                else:
+                    eigs_s[sp], coeffs_b_s[sp] = _eigs_full, _c_full
             else:
                 # k-streaming: solve k in chunks so the resident subspace is
                 # nk_chunk·m·npw regardless of total nk (fock excluded up front).
@@ -2578,7 +2623,7 @@ def scf(
                     device,
                     u_scale,
                     k_chunk_res,
-                    solver_kw,
+                    solver_kw_it,
                 )
         _t_eig_s = time.perf_counter() - _t_eig0
 
@@ -2720,9 +2765,15 @@ def scf(
         ramp_done = hub_u_ramp_iters <= 0 or it >= hub_u_ramp_iters
         if ramp_done and convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
                                           energy_error=e_metric, entol=entol):
-            converged = True
-            rho_s = rho_out_s
-            break
+            if chord_last:
+                # never accept convergence off a chorded (single-RR) solve:
+                # its requested tol_eff was not actually reached, so the
+                # stale-solve clause is blind here. Force one full solve.
+                chord_force_full = True
+            else:
+                converged = True
+                rho_s = rho_out_s
+                break
 
         e_free_prev = e_free
         if spin_precond and nspin == 2 and smearing != "none":
