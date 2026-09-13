@@ -168,16 +168,16 @@ def cmd_init(host: str) -> int:
     return rc
 
 
-def cmd_test(host: str, tier: str) -> int:
+def cmd_test(host: str, tier: str, workdir: str = REPO) -> int:
     sel = FAST_SEL if tier == "fast" else STANDARD_SEL
     jobs = "-n4" if tier == "fast" else "-n auto"
     cmd = f'uv run python -m pytest {jobs} {sel}'
-    return submit(host, "test", cmd, label=f"test-{tier}")
+    return submit(host, "test", cmd, label=f"test-{tier}", workdir=workdir)
 
 
-def cmd_lint(host: str) -> int:
+def cmd_lint(host: str, workdir: str = REPO) -> int:
     return submit(host, "default", "uv run ruff check --output-format=concise",
-                  label="lint")
+                  label="lint", workdir=workdir)
 
 
 def cmd_bench(host: str, name: str, args: list[str]) -> int:
@@ -186,8 +186,9 @@ def cmd_bench(host: str, name: str, args: list[str]) -> int:
     return submit(host, "bench", cmd, label=f"bench:{name}")
 
 
-def cmd_run(host: str, group: str, command: list[str]) -> int:
-    return submit(host, group, " ".join(command), label=command[0] if command else None)
+def cmd_run(host: str, group: str, command: list[str], workdir: str = REPO) -> int:
+    return submit(host, group, " ".join(command), label=command[0] if command else None,
+                  workdir=workdir)
 
 
 def cmd_sweep(host: str, command: list[str]) -> int:
@@ -232,6 +233,11 @@ def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="gwq", description="gradwave job queue (pueue wrapper)")
     p.add_argument("--host", default=None,
                    help="target host (default: this host; benches default to asus)")
+    p.add_argument("--here", action="store_true",
+                   help="run in the CURRENT working directory (this worktree) instead of the "
+                        "canonical checkout — for branch verification under the pueue slot cap. "
+                        "Local-host only (the cwd path must exist on the target box); submit it "
+                        "on the box the worktree lives on.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="create groups with per-host slot budgets")
@@ -270,14 +276,24 @@ def main(argv: list[str]) -> int:
         else:
             host = local
 
+    # --here runs the current worktree (this branch) under the slot cap instead of
+    # the canonical checkout. The cwd path is host-specific, so it must be submitted
+    # on the box the worktree lives on — reject a cross-host --here rather than
+    # silently chdir to a path that doesn't exist on the target.
+    if a.here and host != local:
+        print(f"error: --here runs the current worktree, which only exists on {local!r}; "
+              f"drop --host {host!r} or run this on {host!r}.", file=sys.stderr)
+        return 2
+    workdir = os.getcwd() if a.here else REPO
+
     if a.cmd == "init":
         return cmd_init(host)
     if a.cmd == "test-fast":
-        return cmd_test(host, "fast")
+        return cmd_test(host, "fast", workdir)
     if a.cmd == "test-standard":
-        return cmd_test(host, "standard")
+        return cmd_test(host, "standard", workdir)
     if a.cmd == "lint":
-        return cmd_lint(host)
+        return cmd_lint(host, workdir)
     if a.cmd == "resume":
         return cmd_resume(host)
     if a.cmd == "bench":
@@ -287,7 +303,7 @@ def main(argv: list[str]) -> int:
         if not cmd:
             print("error: `gwq run --group G -- <command>` needs a command", file=sys.stderr)
             return 2
-        return cmd_run(host, a.group, cmd)
+        return cmd_run(host, a.group, cmd, workdir)
     if a.cmd == "sweep":
         cmd = a.command[1:] if a.command and a.command[0] == "--" else a.command
         if not cmd:
