@@ -47,9 +47,8 @@ def build_si_gamma(ecut_ry: float, nrep: int):
     cell = np.eye(3) * (nrep * a)
     root = Path(__file__).resolve().parents[2]
     si = parse_upf(root / "tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf")
-    system = setup_system(cell, pos, [0] * len(pos), [si], ecut=ecut_ry * RY,
-                          kmesh=(1, 1, 1), use_symmetry=False)
-    return system
+    return setup_system(cell, pos, [0] * len(pos), [si], ecut=ecut_ry * RY,
+                        kmesh=(1, 1, 1), use_symmetry=False)
 
 
 def run(mode: str, system):
@@ -73,10 +72,10 @@ def main():
     for i in range(npairs):
         t_off, r_off = run("0", system)
         t_on, r_on = run("1", system)
+        de = abs(float(r_off.energies.total) - float(r_on.energies.total))
         print(f"pair {i}: complex={t_off:.2f}s (gamma_real={r_off.gamma_real}, "
               f"it={r_off.n_iter}) real={t_on:.2f}s (gamma_real={r_on.gamma_real}, "
-              f"it={r_on.n_iter})  dE={abs(float(r_off.energies.total)-float(r_on.energies.total)):.2e}eV",
-              flush=True)
+              f"it={r_on.n_iter})  dE={de:.2e}eV", flush=True)
         offs.append(t_off)
         ons.append(t_on)
     mo, mn = float(np.median(offs)), float(np.median(ons))

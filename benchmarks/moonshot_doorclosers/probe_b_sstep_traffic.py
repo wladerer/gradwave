@@ -130,8 +130,9 @@ def run_sweep(npw: int, newdim: int, reps: int):
         # per-gemm bytes (V + panel read, C write); AI = flops/bytes
         bytes_1 = 16.0 * (npw * newdim + npw * p + newdim * p)
         ai = (8.0 * newdim * p * npw) / bytes_1
+        bpf = bytes_1 / (8.0 * newdim * p * npw)
         print(f"  p={p:4d} wall={dt:7.3f}s GFLOP/s={flops / dt / 1e9:7.1f} "
-              f"AI={ai:6.2f}flop/byte  model_B/flop={2 * bytes_1 / (2 * 8.0 * newdim * p * npw):.4f}")
+              f"AI={ai:6.2f}flop/byte  model_B/flop={bpf:.4f}")
 
 
 def main():

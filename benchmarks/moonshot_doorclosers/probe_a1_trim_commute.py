@@ -31,7 +31,6 @@ from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
 
 torch.manual_seed(0)
-np.random.seed(0)
 RY = 13.605693122994
 
 

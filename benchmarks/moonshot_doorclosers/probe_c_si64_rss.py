@@ -69,7 +69,7 @@ def main():
         res = scf(system, LDA_PW92(), smearing="none", max_iter=3,
                   etol=1e-9, rhotol=1e-8, verbose=False, eigensolver=solver)
         conv_s = f"iters={res.n_iter} conv={res.converged} E={float(res.energies.total):.4f}"
-    except Exception as e:  # noqa: BLE001 - native solver may segfault/raise at this shape
+    except Exception as e:  # native solver may segfault/raise at this shape
         conv_s = f"SCF-RAISED: {type(e).__name__}: {e}"
     dt = time.time() - t0
     print(f"RESULT solver={solver} PEAK_RSS={peak_rss_mb():.0f}MB "
