@@ -59,6 +59,8 @@ from gradwave.scf.common import (
     MP_CROSSOVER,
     adaptive_diago_tol,
     convergence_gate,
+    kernel_energy_metric_nc,
+    make_spin_precond,
     record_iteration,
     symmetrize_rho,
 )
@@ -834,11 +836,10 @@ def scf_noncollinear(
         if energy_metric:
             from gradwave.postscf._response import kernel_energy_error_noncollinear
 
-            r_rho = rho_out - rho
-            r_m = m_out - m
             e_metric, e_m_chg, e_m_mag, e_m_long, e_m_trans = (
-                kernel_energy_error_noncollinear(
-                    grid, xc, r_rho, r_m, rho, m, rho_core=system.rho_core))
+                kernel_energy_metric_nc(
+                    kernel_energy_error_noncollinear, grid, xc, rho, m,
+                    rho_out, m_out, system.rho_core))
             history[-1].update(
                 energy_metric_eV=e_metric, energy_metric_charge_eV=e_m_chg,
                 energy_metric_mag_eV=e_m_mag,
@@ -872,19 +873,13 @@ def scf_noncollinear(
         # path; None in the insulating limit.
         if spin_precond and not nonmagnetic:
             from gradwave.scf.spin_precond import build_stoner_precond_nc
-            sp = build_stoner_precond_nc(
+            stoner_pc = build_stoner_precond_nc(
                 system, coeffs, eigs, mu, scheme, width, rho_out, m_out, xc,
                 m_pw)
-            if sp is None:
+            if stoner_pc is None:
                 mixer.extra_precond = None
-            else:
-                def _spin_pc(rvec, _sp=sp, _ng=ng):
-                    out = rvec.clone()
-                    for c in (1, 2, 3):  # m_x, m_y, m_z channels
-                        out[c * _ng:(c + 1) * _ng] = _sp.apply(
-                            rvec[c * _ng:(c + 1) * _ng])
-                    return out
-                mixer.extra_precond = _spin_pc
+            else:  # m_x, m_y, m_z channels
+                mixer.extra_precond = make_spin_precond(stoner_pc, ng, (1, 2, 3))
         # adaptive fallback against a stalled/oscillating residual (halve the
         # global mixing step and drop the DIIS history) — see _nc_adaptive_backoff
         adapt_mult, last_backoff = _nc_adaptive_backoff(

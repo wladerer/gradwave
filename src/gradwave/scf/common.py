@@ -184,6 +184,77 @@ def hubbard_occ_refresh(
     return mix_hubbard_occ(n_hub_prev, n_hub_s, occ_mix), e_hub
 
 
+def warn_band_count(logger, occ_s, nbands, nspin, *, setup_fn):
+    """Warn when a collinear nspin=2 run leaves occupation in the highest band
+    (the majority channel is not fully accommodated, so the electron count /
+    free energy may be wrong). Shared verbatim by the collinear NC and USPP/PAW
+    drivers; ``nbands`` is the per-channel band count (``nb`` / ``system.nbands``)
+    and ``setup_fn`` names the constructor in the hint (``setup_system`` /
+    ``setup_uspp``). No-op unless nspin==2 with occupations present. Cheap: one
+    reduction. ``logger`` is the caller's module logger so the warning is
+    emitted under the driver's name, exactly as the inlined versions were."""
+    if nspin != 2 or occ_s is None:
+        return
+    top_occ = max(float(o[:, -1].max()) for o in occ_s)
+    if top_occ > 1e-3:
+        logger.warning(
+            "collinear nspin=2: the highest band (of %d) carries occupation "
+            "%.3g — the majority spin channel is not fully accommodated, so "
+            "the converged electron count / free energy may be wrong. "
+            "default_nbands sizes bands from the paramagnetic ceil(N/2) with "
+            "no moment dependence; pass an explicit larger nbands covering "
+            "ceil((N+|M|)/2), e.g. %s(..., nbands=...).",
+            nbands, top_occ, setup_fn,
+        )
+
+
+def kernel_energy_metric(kernel_fn, grid, xc, rho_in_s, rho_out_s, rho_core,
+                         nspin):
+    """Form the per-spin density residual ``r_s = ρ_out − ρ_in`` and evaluate the
+    collinear residual energy-metric ``kernel_fn(grid, xc, r_s, ρ_in_s, ρ_core,
+    nspin)`` — the exact second-order energy error ½⟨r|K_Hxc|r⟩, per channel.
+    Shared by the collinear NC and USPP/PAW loops (which pass
+    ``postscf._response.kernel_energy_error`` as ``kernel_fn``; injected rather
+    than imported here so scf.common adds no cross-package import edge). Returns
+    ``(e_metric, e_metric_charge, e_metric_mag)``. Callers own the input-density
+    provenance (loop.py the real-space ρ_s pair; uspp_loop.py the smooth densities
+    read back from the mixing vectors) and where the result is routed."""
+    r_s = [rho_out_s[sp] - rho_in_s[sp] for sp in range(nspin)]
+    return kernel_fn(grid, xc, r_s, rho_in_s, rho_core, nspin)
+
+
+def kernel_energy_metric_nc(kernel_fn, grid, xc, rho_in, m_in, rho_out, m_out,
+                            rho_core):
+    """Spinor analogue of :func:`kernel_energy_metric`: form the charge and
+    (vector) magnetization residuals and evaluate ``kernel_fn(grid, xc, r_ρ, r_m,
+    ρ_in, m_in, rho_core=ρ_core)`` — the noncollinear residual energy-metric
+    decomposed into charge / longitudinal / transverse channels. The spinor
+    driver passes ``postscf._response.kernel_energy_error_noncollinear`` (injected,
+    same no-new-import-edge reason as above) and routes the 5-tuple onto its
+    history record. Returns whatever ``kernel_fn`` returns
+    ``(e_metric, e_m_chg, e_m_mag, e_m_long, e_m_trans)``."""
+    r_rho = rho_out - rho_in
+    r_m = m_out - m_in
+    return kernel_fn(grid, xc, r_rho, r_m, rho_in, m_in, rho_core=rho_core)
+
+
+def make_spin_precond(stoner_pc, ng, channels):
+    """Build the mixer ``extra_precond`` closure shared by all three
+    spin-preconditioned loops: clone the packed residual vector and overwrite
+    each magnetization-channel block ``[c·ng:(c+1)·ng]`` with
+    ``stoner_pc.apply(...)``, leaving the charge channel untouched. ``channels``
+    is the iterable of channel indices — ``(1,)`` for the collinear m-channel,
+    ``(1, 2, 3)`` for the spinor m_x/m_y/m_z channels. The blocks are disjoint,
+    so the write order is immaterial; ``stoner_pc``/``ng`` are captured by
+    closure exactly as the drivers' default-argument bindings did."""
+    def _spin_pc(rvec):
+        out = rvec.clone()
+        for c in channels:
+            out[c * ng:(c + 1) * ng] = stoner_pc.apply(rvec[c * ng:(c + 1) * ng])
+        return out
+    return _spin_pc
+
+
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,
                        first_tol: float=1e-3):
     """Adaptive diagonalization tolerance (QE-style): loose while the density
