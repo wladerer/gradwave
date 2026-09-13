@@ -198,7 +198,7 @@ and the code keeps a one-line greppable pointer.
 
 ## [D-009] Γ-point real-wavefunction path defaults OFF, not "auto"
 
-- **Date:** 2026-08 · **Status:** active
+- **Date:** 2026-08 · **Status:** superseded by [D-020]
 - **Sites:** `src/gradwave/scf/loop.py` — `_gamma_real_mode`,
   `_resolve_gamma_real`; `src/gradwave/core/gamma.py`
 - **Decision:** `GRADWAVE_GAMMA_REAL` defaults to "0" (complex path,
@@ -449,3 +449,57 @@ and the code keeps a one-line greppable pointer.
   `memory-profile-si64.md` closing note that it does is now stale.
 - **Rejected:** CheFSI as a memory-footprint reducer — its target working set
   is neither the largest transient nor a swapping one on shipped main.
+
+## [D-020] Γ-point real-wavefunction path defaults to "auto" (supersedes [D-009])
+
+- **Date:** 2026-09-12 · **Status:** active
+- **Sites:** `src/gradwave/scf/loop.py` — `_gamma_real_mode`,
+  `_resolve_gamma_real`; `src/gradwave/core/gamma.py`
+- **Decision:** `GRADWAVE_GAMMA_REAL` now defaults to **"auto"** (was "0" under
+  [D-009]): the real half-sphere path engages automatically whenever provably
+  safe and silently falls back otherwise. "1" still forces it (raising on any
+  blocker or non-Γ sphere); "0" still pins the complex path byte-for-byte.
+- **Why the flip:** [D-009] kept it off for ONE reason — the SCF *iteration
+  count* near the rhotol boundary is not bit-reproducible between the real and
+  complex eigensolvers (they pick different, equally-valid orthonormal bases in
+  a gauge-ambiguous degenerate subspace). This is a **test-oracle artifact, not
+  a correctness or stability defect**: every converged quantity (energy,
+  eigenvalues, density) matches the complex path to machine precision. Since the
+  Γ-only workload (molecules, defects, large supercells, amorphous cells) is the
+  broad common case for large systems, an exact ~2× speedup behind an
+  off-by-default flag was an unjustified loss. [D-017] measured the same shipped
+  path at 2.04× on Si-64 Γ 30 Ry and explicitly deferred this off→auto default
+  decision to a separate re-adjudication — this record is that adjudication.
+- **Safe/unsafe matrix (asus, 8 threads, PBE, locked interleaved A/B on the
+  SHIPPED code, forced "1" vs "0"):**
+
+  | case | exact? (rel ΔE) | n_iter cx/real | speedup | verdict |
+  |---|---|---|---|---|
+  | Si-64 insulator, 25 Ry, Γ | 2.6e-16 | 16 / 14 | 2.19× | SAFE (on) |
+  | Si-64 insulator, 30 Ry, Γ | 1.3e-16 | 16 / 14 | 2.39× | SAFE (on) |
+  | Al-32 metal + gaussian smearing, Γ | 2.8e-15 | 16 / 17 | 1.41× | SAFE (on) |
+  | FM fcc Ni, collinear nspin=2, Γ | 0.0 | 11 / 11 | 0.86×† | SAFE (on, per-spin) |
+  | USPP/PAW Γ | n/a | n/a | n/a | never reaches gate (scf_uspp driver) |
+  | noncollinear / SOC | n/a | n/a | n/a | never reaches gate (scf_noncollinear) |
+
+  †The FM Ni case is a 1-atom cell (0.3 s SCF): its small npw makes the real
+  path's fixed overhead net-negative on wall time, but it is bit-exact and the
+  real path halves the field memory. Γ-only work in practice means LARGE cells
+  (molecule/defect in a big box, supercell) where npw is large and the win is
+  the 1.4–2.4× above. Auto engages on any eligible Γ; the tiny-cell case is a
+  negligible-absolute-cost edge, not the target workload — no size gate added.
+
+  Time-reversal (J = complex conjugation, J²=+1) makes the eigenvectors real at
+  Γ for a nonmagnetic system; collinear nspin=2 realifies **per spin channel**
+  (each V_σ(r) is real → its own real half sphere), verified exact above. It
+  FAILS for Kramers J²=−1 (SOC/noncollinear) — but those never reach this gate,
+  routing through `scf_noncollinear`; USPP/PAW likewise route through `scf_uspp`,
+  which has no real path. The `_resolve_gamma_real` gate additionally refuses
+  hybrid Fock, DFT+U, meta-GGA, the fp32 draft, distributed shards, and any
+  non-Γ / non-symmetric sphere.
+- **Test impact:** `tests/integration/test_calculator_warmstart_grid.py` pins an
+  iteration-count *inequality* (`n_warm < n_cold`); on the real path warm==cold
+  (11==11) — the exact [D-009] scenario. It tests the warm-start REMAP logic,
+  identical on both paths, so it now pins `GRADWAVE_GAMMA_REAL=0`. All other
+  Γ-only iteration-count tests are self-consistent (recorder length == that
+  run's own n_iter) or robust inequalities and pass unchanged on the real path.

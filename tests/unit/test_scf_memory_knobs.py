@@ -226,6 +226,12 @@ def test_scf_threads_subspace_knobs_to_davidson(monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(davmod, "davidson_batched", spy)
+    # This spy verifies the MemoryOptions subspace knobs reach davidson_batched,
+    # a BATCHED-Davidson concern. Since [D-020] the Γ-only default is "auto", so
+    # this NC Γ Si run would otherwise take the real half-sphere path
+    # (davidson_gamma), which bypasses the batched subspace machinery these knobs
+    # configure — leaving the spy unfired. Pin the complex path to exercise it.
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "0")
 
     si = parse_upf(str(_P / SI_ONCV))
     cell, pos = si_fcc()
