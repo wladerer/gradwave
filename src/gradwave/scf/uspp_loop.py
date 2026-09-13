@@ -55,12 +55,15 @@ from gradwave.scf.common import (
     convergence_gate,
     hubbard_occ_refresh,
     hubbard_u_ramp_scale,
+    kernel_energy_metric,
+    make_spin_precond,
     record_iteration,
     shared_fermi_occupations,
     spin_xc_energy,
     symmetrize_rho,
     validate_hubbard_conv,
     warm_start_densities,
+    warn_band_count,
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
@@ -1910,9 +1913,9 @@ def scf_uspp(
 
             sm_in, _ = layout.unpack(rho_in_vec)
             sm_out, _ = layout.unpack(rho_out_vec)
-            r_s = [sm_out[sp] - sm_in[sp] for sp in range(nspin)]
-            e_metric, e_metric_charge, e_metric_mag = kernel_energy_error(
-                grid, xc, r_s, sm_in, system.rho_core, nspin
+            e_metric, e_metric_charge, e_metric_mag = kernel_energy_metric(
+                kernel_energy_error, grid, xc, sm_in, sm_out,
+                system.rho_core, nspin
             )
         recorder.record(
             it=it,
@@ -2018,7 +2021,9 @@ def scf_uspp(
             # amplifies and history mixing cannot hold
             from gradwave.scf.spin_precond import build_stoner_precond
 
-            sp = build_stoner_precond(
+            # `stoner_pc`, not `sp`: `sp` is the species/spin index throughout
+            # this module — a `sp = build_stoner_precond(...)` rebind here shadows it.
+            stoner_pc = build_stoner_precond(
                 system,
                 coeffs,
                 eigs_s,
@@ -2030,16 +2035,10 @@ def scf_uspp(
                 xc,
                 dist_ctx=dist_ctx,
             )
-            if sp is None:
+            if stoner_pc is None:
                 mixer.extra_precond = None
             else:
-
-                def _spin_pc(rvec, _sp=sp):
-                    out = rvec.clone()
-                    out[ng : 2 * ng] = _sp.apply(rvec[ng : 2 * ng])
-                    return out
-
-                mixer.extra_precond = _spin_pc
+                mixer.extra_precond = make_spin_precond(stoner_pc, ng, (1,))
         if tf_precond is not None:
             tf_precond.set_density(rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1])
         mixed = mixer.step(rho_in_vec, rho_out_vec)
@@ -2051,25 +2050,9 @@ def scf_uspp(
                 m = bec_mixed[isp][a]
                 rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
 
-    # Band-count guard (collinear nspin=2). default_nbands sizes the per-channel
-    # band count from the PARAMAGNETIC ceil(N/2) with no moment dependence, so a
-    # sizable spin moment can leave the majority channel with more occupied
-    # states than bands — the Fermi solver then cannot place all majority
-    # electrons and the electron count / free energy come out wrong. Occupation
-    # left in the highest band is the direct symptom (occ_s is per-state in
-    # [0,1] on the nspin=2 path); warn to raise nbands. Cheap: one reduction.
-    if nspin == 2 and occ_s is not None:
-        top_occ = max(float(o[:, -1].max()) for o in occ_s)
-        if top_occ > 1e-3:
-            logger.warning(
-                "collinear nspin=2: the highest band (of %d) carries occupation "
-                "%.3g — the majority spin channel is not fully accommodated, so "
-                "the converged electron count / free energy may be wrong. "
-                "default_nbands sizes bands from the paramagnetic ceil(N/2) with "
-                "no moment dependence; pass an explicit larger nbands covering "
-                "ceil((N+|M|)/2), e.g. setup_uspp(..., nbands=...).",
-                system.nbands, top_occ,
-            )
+    # Band-count guard (collinear nspin=2): warn when the majority channel is
+    # not fully accommodated by nbands (shared with the collinear NC driver).
+    warn_band_count(logger, occ_s, system.nbands, nspin, setup_fn="setup_uspp")
 
     if not converged:
         logger.warning(
@@ -2134,7 +2117,10 @@ def scf_uspp(
         system = cast("USPPSystem", dist_ctx.full_system)
     return USPPResult(
         converged=converged,
-        n_iter=len(history),
+        # `it`, not `len(history)`: the solver-blowup rescue does `continue`
+        # without appending to history, so len(history) < it under-reports the
+        # iteration count. Match the other three drivers' `it` convention.
+        n_iter=it,
         energies=energies,
         eigenvalues=eigs_s[0] if nspin == 1 else torch.stack(eigs_s),
         occupations=occ_s[0] if nspin == 1 else torch.stack(occ_s),

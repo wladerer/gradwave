@@ -28,9 +28,9 @@ from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._strain import _HubbardSite
+from gradwave.postscf._strain import _HubbardSite, strained_dens_sphere
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
-from gradwave.postscf.stress import _box_millers, _ewald_strained
+from gradwave.postscf.stress import _ewald_strained
 from gradwave.pseudo.radial_torch import radial_tables, sbt_t, simpson_weights
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
@@ -159,6 +159,15 @@ def _hub_sproj_strained(
 def _energy_strained_uspp(
     res: USPPResult, xc: XCFunctional | SpinXC, eps: torch.Tensor
 ) -> torch.Tensor:
+    # meta-GGA (needs_tau) stress is NOT implemented on the USPP/PAW strain
+    # path: τ=½Σf|∇ψ|² carries an explicit strain dependence through the
+    # strained (k+G) in ∇ψ that this path never builds (the NC sibling
+    # stress.py:_energy_strained builds _tau_strained for exactly this). It is
+    # gated OFF upstream (no fixtures, untested); fail loud here so loosening
+    # that gate surfaces the gap instead of returning a silently-wrong σ.
+    assert not getattr(xc, "needs_tau", False), (
+        "meta-GGA (needs_tau) stress is not implemented on the USPP/PAW strain "
+        "path")
     system = res["system"]
     grid = system.grid
     shape = grid.shape
@@ -176,14 +185,13 @@ def _energy_strained_uspp(
     omega = omega * torch.sign(omega.detach())
     pos_e = system.positions.detach() @ f_map.T
 
-    mask = grid.dens_mask.reshape(-1)
-    m_box = _box_millers(shape, dev)
-    m_sph = m_box[mask]
-    g_sph = m_sph @ b_e
-    g2_sph = (g_sph**2).sum(-1)
-    is_g0 = g2_sph.detach() < 1e-12
-    q_sph = torch.sqrt(torch.where(is_g0, torch.ones_like(g2_sph), g2_sph))
-    q_sph = torch.where(is_g0, torch.zeros_like(q_sph), q_sph)
+    # density-sphere G-vectors rebuilt from integer Miller labels (shared with
+    # the NC path, postscf._strain.strained_dens_sphere) — mask, dense-box
+    # Miller labels, strained sphere vectors/moduli, the G=0 flag and the
+    # G=0-safe |G| and 1/G². Identical derivation to the inlined form it
+    # replaces (box_millers over grid.shape restricted to grid.dens_mask).
+    mask, m_box, g_sph, _g2_sph, is_g0, q_sph, inv_g2 = strained_dens_sphere(
+        grid, b_e, dev)
     sphere_idx = system.sphere_idx
 
     kw = system.kweights
@@ -317,8 +325,7 @@ def _energy_strained_uspp(
         rho_r_chans.append(g_to_r_box(rho_box.reshape(shape), real=True))
 
     rho_sph_tot = sum(rho_sph_chans)
-    g2_safe = torch.where(is_g0, torch.ones_like(g2_sph), g2_sph)
-    inv_g2 = torch.where(is_g0, torch.zeros_like(g2_sph), 1.0 / g2_safe)
+    # inv_g2 (G=0-safe 1/G²) comes from strained_dens_sphere above.
     e_total = e_total + 0.5 * 4.0 * math.pi * E2 * omega * (
         (rho_sph_tot.abs() ** 2) * inv_g2).sum()
 

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from gradwave.api._common import SPIN_XC_REGISTRY
+from gradwave.api._common import SPIN_XC_REGISTRY, effective_smearing_type
 from gradwave.api.dispersion import _apply_dispersion
 from gradwave.api.elastic import run_elastic
 from gradwave.api.eos import run_eos
@@ -38,6 +39,7 @@ from gradwave.api.surface_energy import run_surface_energy
 from gradwave.api.system import build_system
 from gradwave.api.thermochem import run_thermochem
 from gradwave.inputs import Input
+from gradwave.inputs.models import DISTRIBUTED_TASKS, TASKS
 
 if TYPE_CHECKING:
 
@@ -58,7 +60,7 @@ def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
         system = system.to(inp.device)
     xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
     m = inp.magnetism
-    smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
+    smtype = effective_smearing_type(inp.smearing.type)
     return characterize_magnetism(
         system, xc, exchange=m.exchange, ref_atom=m.ref_atom, lam=m.lam,
         delta=m.delta, seed_scale=m.seed_scale, smearing=smtype,
@@ -66,12 +68,44 @@ def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
         rhotol=inp.scf.rhotol, mixing_alpha=inp.scf.mixing.alpha, verbose=verbose)
 
 
-# post-SCF tasks whose run() branch is a bare "run it, wrap the result" —
-# collapsed into one data-driven branch below
-_POSTSCF_RUNNERS = {"eos": run_eos, "elastic": run_elastic,
-                    "phonons": run_phonons,
-                    "surface_energy": run_surface_energy,
-                    "qha": run_qha}
+def _run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
+    """Adapter that threads the eos block's noise-aware uncertainty controls
+    (``sigma_e`` / ``uq_samples`` / ``uq_seed``) into ``run_eos`` — without this
+    the documented ``uncertainty`` summary sub-block is unreachable from the
+    YAML/CLI path (dispatch calls every table runner as ``runner(inp, verbose=)``)."""
+    return run_eos(inp, verbose=verbose, sigma_e=inp.eos.sigma_e,
+                   uq_samples=inp.eos.uq_samples, uq_seed=inp.eos.uq_seed)
+
+
+# Data-driven post-SCF task routing: task -> (runner, base-summary builder).
+# Every runner is invoked `runner(inp, verbose=verbose)` and its result is
+# stored under `summary[task]`; the tasks differ only in which context block the
+# base summary carries (plain / thermochem / magnons / flapw). Genuinely special
+# tasks (scf/bands/optics/relax/neb/magnetism) keep their explicit run() branch.
+_TASK_TABLE: dict[
+    str, tuple[Callable[..., Any], Callable[[Input, str], dict[str, Any]]]
+] = {
+    "eos": (_run_eos, _base_summary),
+    "elastic": (run_elastic, _base_summary),
+    "phonons": (run_phonons, _base_summary),
+    "surface_energy": (run_surface_energy, _base_summary),
+    "qha": (run_qha, _base_summary),
+    "thermochem": (run_thermochem, _thermochem_base_summary),
+    "magnons": (run_magnons, _magnons_base_summary),
+    "flapw": (run_flapw, _flapw_base_summary),
+    "nmr": (run_nmr, _flapw_base_summary),
+}
+
+# Tasks with a bespoke run() branch (SCF-result handling / extra summary blocks).
+_SPECIAL_TASKS = ("scf", "relax", "neb", "bands", "optics", "magnetism")
+
+# Drift guard: the two routing groups must exactly partition the authoritative
+# registry, so a name added to inputs.TASKS without a driver branch (or a branch
+# without a registry entry) fails at import here, not at run time on a bare
+# ValueError deep in the dispatch.
+assert set(_SPECIAL_TASKS) | set(_TASK_TABLE) == set(TASKS), (
+    "api.dispatch routing is out of sync with inputs.models.TASKS: "
+    f"{set(TASKS) ^ (set(_SPECIAL_TASKS) | set(_TASK_TABLE))}")
 
 
 def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
@@ -85,12 +119,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     from gradwave.io.output import write_output
     from gradwave.io.runinfo import ProcessMeter, machine_snapshot, provenance_block
 
-    if inp.distributed and inp.task not in ("scf", "bands", "relax", "eos"):
+    if inp.distributed and inp.task not in DISTRIBUTED_TASKS:
         raise NotImplementedError(
-            f"distributed: true is wired for task: scf | bands | relax | eos "
-            f"(got task: {inp.task!r}) — elastic/phonons/magnetism don't route "
-            f"through the k-point-sharded SCF path yet (see "
-            f"docs/manual/distributed.md)"
+            f"distributed: true is wired for task: "
+            f"{' | '.join(DISTRIBUTED_TASKS)} (got task: {inp.task!r}) — "
+            f"elastic/phonons/magnetism don't route through the k-point-sharded "
+            f"SCF path yet (see docs/manual/distributed.md)"
         )
     snap = machine_snapshot()
     meter = ProcessMeter()
@@ -164,38 +198,17 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
             else round(report.curie_temperature_mfa),
         }
         summary["runtime_s"] = round(time.time() - t0, 2)
-    elif inp.task in _POSTSCF_RUNNERS:
-        block = _POSTSCF_RUNNERS[inp.task](inp, verbose=verbose)
-        summary = _base_summary(inp, inp.task)
+    elif inp.task in _TASK_TABLE:
+        # Data-driven "run it, wrap the result" tasks (post-SCF fits and the
+        # numbers-in / all-electron drivers). The numbers-in and FLAPW tasks
+        # leave res=None, so no checkpoint/volumetric is written below.
+        runner, base_summary_fn = _TASK_TABLE[inp.task]
+        block = runner(inp, verbose=verbose)
+        summary = base_summary_fn(inp, inp.task)
         summary[inp.task] = block
         summary["runtime_s"] = round(time.time() - t0, 2)
-    elif inp.task == "thermochem":
-        # numbers-in free-energy task: no SCF, no plane-wave result (res stays
-        # None so no checkpoint/volumetric is written below)
-        summary = _thermochem_base_summary(inp, "thermochem")
-        summary["thermochem"] = run_thermochem(inp, verbose=verbose)
-        summary["runtime_s"] = round(time.time() - t0, 2)
-    elif inp.task == "magnons":
-        # numbers-in linear-spin-wave task: no SCF, no plane-wave result (res
-        # stays None so no checkpoint/volumetric is written below)
-        summary = _magnons_base_summary(inp, "magnons")
-        summary["magnons"] = run_magnons(inp, verbose=verbose)
-        summary["runtime_s"] = round(time.time() - t0, 2)
-    elif inp.task == "flapw":
-        # all-electron muffin-tin FLAPW SCF; no plane-wave SCFResult (res stays
-        # None so no checkpoint/volumetric is written below)
-        summary = _flapw_base_summary(inp, "flapw")
-        summary["flapw"] = run_flapw(inp, verbose=verbose)
-        summary["runtime_s"] = round(time.time() - t0, 2)
-    elif inp.task == "nmr":
-        summary = _flapw_base_summary(inp, "nmr")
-        summary["nmr"] = run_nmr(inp, verbose=verbose)
-        summary["runtime_s"] = round(time.time() - t0, 2)
     else:
-        raise ValueError(
-            f"unknown task {inp.task!r} "
-            f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | surface_energy | qha | magnons | flapw | nmr)")
+        raise ValueError(f"unknown task {inp.task!r} ({' | '.join(TASKS)})")
 
     if inp.distributed:
         from gradwave.distributed import current_rank, maybe_destroy_process_group

@@ -403,13 +403,7 @@ class GradWave(Calculator):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        if nspin not in (1, 2):
-            # collinear spin (nspin=2) threads through the norm-conserving SCF,
-            # forces, and stress below; noncollinear/SOC has no calculator path
-            raise ValueError(
-                "GradWave supports nspin=1 (spin-restricted) and nspin=2 "
-                "(collinear spin); noncollinear/spin-orbit has no calculator "
-                "path yet (use task: magnetism via the api)")
+        self._validate_params(nspin, boundary, pulay_solver, extrapolation)
         self.parameters.update(
             dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
                  kshift=tuple(kshift), smearing=smearing, width=width,
@@ -426,58 +420,19 @@ class GradWave(Calculator):
                  boundary=str(boundary), esm_bias=float(esm_bias),
                  target_mu=(None if target_mu is None else float(target_mu)))
         )
-        if boundary not in ("periodic", "open_z", "open_z_metal"):
-            raise ValueError(
-                "boundary must be 'periodic', 'open_z' or 'open_z_metal', got "
-                f"{boundary!r}")
-        if pulay_solver not in ("diagonal", "cg"):
-            raise ValueError(
-                f"pulay_solver must be 'diagonal' or 'cg', got {pulay_solver!r}")
-        if extrapolation not in ("none", "reuse", "linear", "quadratic"):
-            raise ValueError(
-                "extrapolation must be 'none', 'reuse', 'linear', or "
-                f"'quadratic', got {extrapolation!r}")
         # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
         # enabled with defaults (functional = the SCF xc); a dict overrides any
         # of functional/cutoff/cn_cutoff/s6/s8/a1/a2; None/False → off. Stored on
         # self.parameters so toggling it invalidates ASE's cached results.
-        self._dispersion: dict[str, Any] | None
-        if dispersion in (None, False):
-            self._dispersion = None
-        elif dispersion is True:
-            self._dispersion = {}
-        elif isinstance(dispersion, dict):
-            self._dispersion = dict(dispersion)
-        else:
-            raise ValueError(
-                "dispersion must be True/False or a dict of D3(BJ)/D4(BJ) "
-                "overrides (method, functional, cutoff, cn_cutoff, s6, s8, a1, "
-                "a2; D4 also accepts charge)")
-        if self._dispersion is not None:
-            method = str(self._dispersion.get("method", "d3")).lower()
-            if method not in ("d3", "d4"):
-                raise ValueError(
-                    f"dispersion method must be 'd3' or 'd4', got {method!r}")
+        self._dispersion: dict[str, Any] | None = self._normalize_dispersion(
+            dispersion)
         self.parameters["dispersion"] = self._dispersion
         # DFT+U manifolds normalized to (element, l, U, J) tuples and kept
         # element-keyed; resolved to species indices per calculate() (where the
         # current atoms' symbol ordering is known). Accepts objects with
         # .species/.l/.u/.j (inputs.HubbardManifoldSpec) or plain dicts.
-        def _norm(m: object) -> tuple[str, int, float, float]:
-            if isinstance(m, dict):
-                sp, ll, u, j = m.get("species"), m.get("l"), m.get("u"), m.get("j", 0.0)
-            else:
-                sp = getattr(m, "species", None)
-                ll = getattr(m, "l", None)
-                u = getattr(m, "u", None)
-                j = getattr(m, "j", 0.0)
-            # both branches yield gradually-typed (dict/attr-lookup) values;
-            # cast documents that str()/int()/float() below are exactly the
-            # runtime validation doing the real type-narrowing work.
-            return (str(cast(Any, sp)), int(cast(Any, ll)),
-                    float(cast(Any, u)), float(cast(Any, j)))
         self._hubbard: list[tuple[str, int, float, float]] | None = (
-            None if not hubbard else [_norm(m) for m in hubbard])
+            self._normalize_hubbard(hubbard))
         self.parameters["hubbard"] = (None if self._hubbard is None
                                       else tuple(self._hubbard))
         # +U convergence aids (forwarded to scf/scf_uspp when hubbard is set);
@@ -545,6 +500,84 @@ class GradWave(Calculator):
         self.last_pulay_pressure_gpa: float | None = None  # the Pulay pressure
         # [GPa] added to the reported stress by the last calculate() (None when
         # the correction is off) — read by api._relax_nested for reporting
+
+    @staticmethod
+    def _validate_params(
+        nspin: int, boundary: str, pulay_solver: str, extrapolation: str
+    ) -> None:
+        """Enum/range validation for the constructor's discrete parameters.
+
+        Raises ``ValueError`` with the historical messages, in the historical
+        order (nspin, boundary, pulay_solver, extrapolation), so a bad value
+        fails at construction exactly as before. Split out of ``__init__`` for
+        readability; the ``dispersion`` method enum is validated inside
+        ``_normalize_dispersion`` where the normalized dict is in hand."""
+        if nspin not in (1, 2):
+            # collinear spin (nspin=2) threads through the norm-conserving SCF,
+            # forces, and stress below; noncollinear/SOC has no calculator path
+            raise ValueError(
+                "GradWave supports nspin=1 (spin-restricted) and nspin=2 "
+                "(collinear spin); noncollinear/spin-orbit has no calculator "
+                "path yet (use task: magnetism via the api)")
+        if boundary not in ("periodic", "open_z", "open_z_metal"):
+            raise ValueError(
+                "boundary must be 'periodic', 'open_z' or 'open_z_metal', got "
+                f"{boundary!r}")
+        if pulay_solver not in ("diagonal", "cg"):
+            raise ValueError(
+                f"pulay_solver must be 'diagonal' or 'cg', got {pulay_solver!r}")
+        if extrapolation not in ("none", "reuse", "linear", "quadratic"):
+            raise ValueError(
+                "extrapolation must be 'none', 'reuse', 'linear', or "
+                f"'quadratic', got {extrapolation!r}")
+
+    @staticmethod
+    def _normalize_dispersion(
+        dispersion: bool | dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Normalize the ``dispersion`` argument to its internal dict-or-None
+        form, validating the D3/D4 method enum. True → ``{}`` (defaults);
+        None/False → None; a dict is copied. Raises ``ValueError`` on any other
+        type or an unrecognized method, with the historical messages."""
+        if dispersion in (None, False):
+            disp = None
+        elif dispersion is True:
+            disp = {}
+        elif isinstance(dispersion, dict):
+            disp = dict(dispersion)
+        else:
+            raise ValueError(
+                "dispersion must be True/False or a dict of D3(BJ)/D4(BJ) "
+                "overrides (method, functional, cutoff, cn_cutoff, s6, s8, a1, "
+                "a2; D4 also accepts charge)")
+        if disp is not None:
+            method = str(disp.get("method", "d3")).lower()
+            if method not in ("d3", "d4"):
+                raise ValueError(
+                    f"dispersion method must be 'd3' or 'd4', got {method!r}")
+        return disp
+
+    @staticmethod
+    def _normalize_hubbard(
+        hubbard: Iterable[object] | None,
+    ) -> list[tuple[str, int, float, float]] | None:
+        """Normalize DFT+U manifolds to (element, l, U, J) tuples. Accepts
+        objects with ``.species``/``.l``/``.u``/``.j`` (inputs.HubbardManifoldSpec)
+        or plain dicts; ``None``/empty → None."""
+        def _norm(m: object) -> tuple[str, int, float, float]:
+            if isinstance(m, dict):
+                sp, ll, u, j = m.get("species"), m.get("l"), m.get("u"), m.get("j", 0.0)
+            else:
+                sp = getattr(m, "species", None)
+                ll = getattr(m, "l", None)
+                u = getattr(m, "u", None)
+                j = getattr(m, "j", 0.0)
+            # both branches yield gradually-typed (dict/attr-lookup) values;
+            # cast documents that str()/int()/float() below are exactly the
+            # runtime validation doing the real type-narrowing work.
+            return (str(cast(Any, sp)), int(cast(Any, ll)),
+                    float(cast(Any, u)), float(cast(Any, j)))
+        return None if not hubbard else [_norm(m) for m in hubbard]
 
     def _make_xc(self, nspin: int = 1) -> XCFunctional | SpinXC:
         """Instantiate the XC functional, opting into the compiled real-valued

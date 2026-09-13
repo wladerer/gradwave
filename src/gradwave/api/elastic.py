@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from gradwave.api._common import build_xc, time_reversal_ok
 from gradwave.api.scf import run_scf
-from gradwave.api.system import _as_paws, _as_upfs, _fft_grid, _is_uspp, _species_upfs
+from gradwave.api.system import (
+    _fft_grid,
+    _is_uspp,
+    _species_upfs,
+    build_scaled_system,
+)
 from gradwave.constants import EV_A3_TO_GPA
 from gradwave.inputs import Input
 
@@ -35,25 +40,14 @@ def _elastic_build(
     inp: Input, upfs: Any, uspp: bool, soa: Any, cell: Any,
     fixed: Any, time_reversal: bool,
 ) -> System | USPPSystem:
-    """Build the strained system on the pinned FFT grid (mirrors run_elastic's
-    ``_build`` closure; fractional coordinates held fixed = clamped-ion)."""
+    """Build the strained system on the pinned FFT grid via the shared
+    ``build_scaled_system`` (fractional coordinates held fixed = clamped-ion)."""
     import numpy as np
 
     pos = inp.atoms.get_scaled_positions() @ np.asarray(cell, dtype=float)
-    if uspp:
-        from gradwave.scf.uspp import setup_uspp
-
-        return setup_uspp(
-            cell, pos, soa, _as_paws(upfs), ecut=inp.ecut,
-            kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
-            use_symmetry=inp.symmetry, fft_shape=fixed)
-    from gradwave.scf.loop import setup_system
-
-    return setup_system(
-        cell=cell, positions=pos, species_of_atom=soa, upfs=_as_upfs(upfs),
-        ecut=inp.ecut, kmesh=inp.kpoints.mesh, kshift=inp.kpoints.shift,
-        nbands=inp.nbands, use_symmetry=inp.symmetry,
-        time_reversal=time_reversal, fft_shape=fixed)
+    return build_scaled_system(
+        inp, upfs, uspp, soa, cell, pos, fft_shape=fixed,
+        time_reversal=time_reversal)
 
 
 def _elastic_stress(res: Any, xc: Any, uspp: bool) -> Any:
@@ -192,21 +186,9 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     ) -> System | USPPSystem:
         if pos is None:
             pos = frac @ cell
-        if uspp:
-            from gradwave.scf.uspp import setup_uspp
-
-            return setup_uspp(
-                cell, pos, species_of_atom, _as_paws(upfs), ecut=inp.ecut,
-                kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
-                use_symmetry=inp.symmetry, fft_shape=fft_shape)
-        from gradwave.scf.loop import setup_system
-
-        return setup_system(
-            cell=cell, positions=pos, species_of_atom=species_of_atom,
-            upfs=_as_upfs(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
-            kshift=inp.kpoints.shift, nbands=inp.nbands,
-            use_symmetry=inp.symmetry, time_reversal=time_reversal,
-            fft_shape=fft_shape)
+        return build_scaled_system(
+            inp, upfs, uspp, species_of_atom, cell, pos, fft_shape=fft_shape,
+            time_reversal=time_reversal)
 
     # pin one FFT grid: the +h strains give the largest cells / finest grids
     from gradwave.postscf.elastic import voigt_strain_tensor

@@ -7,7 +7,15 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from gradwave.api._common import _OCC_TOL, SPIN_XC_REGISTRY, XC_REGISTRY, _gap, _get, build_xc
+from gradwave.api._common import (
+    _OCC_TOL,
+    SPIN_XC_REGISTRY,
+    XC_REGISTRY,
+    _gap,
+    _get,
+    build_xc,
+    effective_smearing_type,
+)
 from gradwave.api.system import _is_uspp, _resolve_kmesh, _species_upfs
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
@@ -462,7 +470,7 @@ def _error_estimate_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     res_nc = cast("SCFResult", res)
     # a non-collinear SCF always runs with a real smearing scheme (spinor bands
     # hold one electron); a "none" request maps to gaussian, as the run does.
-    nc_scheme = ("gaussian" if inp.smearing.type == "none" else inp.smearing.type)
+    nc_scheme = effective_smearing_type(inp.smearing.type)
     dens_kw: dict[str, Any] = (
         dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {})
     try:

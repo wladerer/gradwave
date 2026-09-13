@@ -534,30 +534,50 @@ def _joint_supported(inp: Input, upfs: list[UPFData | PAWData]) -> str | None:
     return None
 
 
-def _relax_joint(
-    inp: Input, verbose: bool = True
+def _relax_second_order(
+    inp: Input,
+    verbose: bool,
+    *,
+    method: str,
+    engine_call: Callable[..., Any],
+    frame_step: Callable[[Any], int],
+    nonconverged_msg: Callable[[Any], str],
+    provenance: Callable[[Any], dict[str, Any]],
+    summary_line: Callable[[Any, float, float], str],
 ) -> tuple[dict[str, Any], Atoms, list[Atoms]] | None:
-    """Joint (strain, positions, orbitals) descent as a relax engine.
+    """Shared body of the ``joint``/``newton`` second-order relax engines.
+
+    Both engines share the same ``_joint_supported`` guard, cell0/pos0/fix_cell/
+    smax setup, try/except-fallback-to-None wrapping of the inner descent, the
+    final ASE-consistent energy/forces/stress re-solve at the relaxed geometry
+    (via the ``_build_relax_calc`` module global — so both report calculator
+    numbers, not the descent functional's fixed-basis value), and the ~20-key
+    ``relax`` result dict. They differ only in the inner engine call and a few
+    provenance keys, injected here as callables:
+
+    - ``engine_call(cell0, pos0, species_of_atom, upfs, smax, fix_cell)`` runs
+      the descent and returns its result (may raise ValueError/RuntimeError);
+    - ``frame_step(res)`` → the step index stamped on the output frame;
+    - ``nonconverged_msg(res)`` → the info-log line when the descent did not
+      converge;
+    - ``provenance(res)`` → the engine-specific result keys (n_closures /
+      n_newton…, optimizer), inserted after ``n_steps``;
+    - ``summary_line(res, energy, fmax_final)`` → the verbose success line.
 
     Returns the same ``(relax, atoms, frames)`` tuple as the nested engine, or
     ``None`` to signal the caller should fall back to nested — either because
-    the system is outside the joint contract or because the descent did not
-    converge. Convergence gates are mapped from the ASE calculator's: the force
-    tolerance is ``relax.fmax`` and (variable cell) the stress tolerance is
-    ``fmax/Ω`` — the FrechetCellFilter treats σ·Ω as a generalized force gated
-    by the same scalar. The final energy/forces/stress are recomputed with one
-    calculator SCF at the relaxed geometry so they are ASE-consistent (not the
-    joint functional's fixed-basis value) and ``last_result`` is populated for
-    downstream error estimates."""
+    the system is outside the joint/newton contract or because the descent did
+    not converge. Convergence gates are mapped from the ASE calculator's: the
+    force tolerance is ``relax.fmax`` and (variable cell) the stress tolerance
+    is ``fmax/Ω`` — the FrechetCellFilter treats σ·Ω as a generalized force
+    gated by the same scalar."""
     import numpy as np
     from ase.calculators.singlepoint import SinglePointCalculator
 
-    from gradwave.opt.joint import joint_relax
-
-    species, upfs, species_of_atom = _species_upfs(inp)
+    _species, upfs, species_of_atom = _species_upfs(inp)
     reason = _joint_supported(inp, upfs)
     if reason is not None:
-        logger.info("relax method=joint not applicable: %s", reason)
+        logger.info("relax method=%s not applicable: %s", method, reason)
         return None
 
     cell0 = inp.atoms.cell.array.copy()
@@ -566,18 +586,13 @@ def _relax_joint(
     omega = float(abs(np.linalg.det(cell0)))
     smax = inp.relax.fmax / omega  # σ·Ω is the FrechetCellFilter cell "force"
     try:
-        res = joint_relax(
-            cell0, pos0, species_of_atom, upfs, XC_REGISTRY[inp.xc](),
-            ecut=inp.ecut, kmesh=inp.kpoints.mesh, fmax=inp.relax.fmax,
-            smax=smax, max_closures=40 * inp.relax.max_steps,
-            fix_cell=fix_cell, device=inp.device, verbose=verbose,
-        )
+        res = engine_call(cell0, pos0, species_of_atom, upfs, smax, fix_cell)
     except (ValueError, RuntimeError) as exc:  # torch LinAlgError ⊂ RuntimeError
-        logger.warning("joint relax failed (%s); falling back to nested", exc)
+        logger.warning("%s relax failed (%s); falling back to nested",
+                       method, exc)
         return None
     if not res.converged:
-        logger.info("joint relax did not converge in %d closures; falling back",
-                    res.n_closures)
+        logger.info("%s", nonconverged_msg(res))
         return None
 
     # final ASE-consistent energy/forces/stress at the relaxed geometry
@@ -593,15 +608,16 @@ def _relax_joint(
         sp_kw["stress"] = atoms.get_stress()
     frame = atoms.copy()
     frame.calc = SinglePointCalculator(frame, **sp_kw)
-    frame.info["step"] = res.n_closures
+    frame.info["step"] = frame_step(res)
     last = getattr(atoms.calc, "last_result", None)
 
     relax: dict[str, Any] = {
         "converged": True,
-        "method": "joint",
-        "n_steps": res.n_cycles,             # basis-rebuild cycles (outer loop)
-        "n_closures": res.n_closures,        # L-BFGS energy+grad evaluations
-        "optimizer": "lbfgs",
+        "method": method,
+        "n_steps": res.n_cycles,
+    }
+    relax.update(provenance(res))  # n_closures/optimizer or n_newton/n_grad/…
+    relax.update({
         "cell_relaxed": bool(inp.relax.cell),
         "fmax_target_eV_ang": inp.relax.fmax,
         "energy_eV": energy,
@@ -615,7 +631,7 @@ def _relax_joint(
         # H-apply provenance — the reason to use this engine
         "h_applies": int(res.h_equiv),
         "h_seed": int(res.h_seed),
-    }
+    })
     if last is not None:
         relax["scf_iter_final"] = int(getattr(last, "n_iter", 0))
         if getattr(last, "system", None) is not None:
@@ -624,10 +640,49 @@ def _relax_joint(
         relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
         relax["pressure_GPa"] = inp.relax.pressure
     if verbose:
-        print(f"  relax: joint engine converged — E = {energy:+.8f} eV · "
-              f"fmax = {fmax_final:.5f} eV/Å · {res.n_cycles} cycles / "
-              f"{res.n_closures} closures · {res.h_equiv} H-applies", flush=True)
+        print(summary_line(res, energy, fmax_final), flush=True)
     return relax, atoms, [frame]
+
+
+def _relax_joint(
+    inp: Input, verbose: bool = True
+) -> tuple[dict[str, Any], Atoms, list[Atoms]] | None:
+    """Joint (strain, positions, orbitals) descent as a relax engine.
+
+    A thin wrapper over ``_relax_second_order``: it supplies the ``joint_relax``
+    inner descent (norm-conserving, nspin=1, insulators only) and the L-BFGS
+    closure-count provenance. Returns the shared ``(relax, atoms, frames)``
+    tuple or ``None`` to fall back to nested (unsupported system or the descent
+    did not converge). The final energy/forces/stress are recomputed with one
+    calculator SCF at the relaxed geometry so they are ASE-consistent (not the
+    joint functional's fixed-basis value) and ``last_result`` is populated for
+    downstream error estimates."""
+    from gradwave.opt.joint import joint_relax
+
+    def _engine(cell0: Any, pos0: Any, species_of_atom: Any, upfs: Any,
+                smax: float, fix_cell: bool) -> Any:
+        return joint_relax(
+            cell0, pos0, species_of_atom, upfs, XC_REGISTRY[inp.xc](),
+            ecut=inp.ecut, kmesh=inp.kpoints.mesh, fmax=inp.relax.fmax,
+            smax=smax, max_closures=40 * inp.relax.max_steps,
+            fix_cell=fix_cell, device=inp.device, verbose=verbose,
+        )
+
+    return _relax_second_order(
+        inp, verbose, method="joint", engine_call=_engine,
+        frame_step=lambda res: res.n_closures,
+        nonconverged_msg=lambda res: (
+            f"joint relax did not converge in {res.n_closures} closures; "
+            "falling back"),
+        provenance=lambda res: {
+            "n_closures": res.n_closures,    # L-BFGS energy+grad evaluations
+            "optimizer": "lbfgs",
+        },
+        summary_line=lambda res, energy, fmax_final: (
+            f"  relax: joint engine converged — E = {energy:+.8f} eV · "
+            f"fmax = {fmax_final:.5f} eV/Å · {res.n_cycles} cycles / "
+            f"{res.n_closures} closures · {res.h_equiv} H-applies"),
+    )
 
 
 def _relax_newton(
@@ -641,82 +696,31 @@ def _relax_newton(
     (grad/Hvp/trial counts instead of L-BFGS closures). Final energy/forces/
     stress are recomputed with one calculator SCF at the relaxed geometry so
     the reported numbers are ASE-consistent."""
-    import numpy as np
-    from ase.calculators.singlepoint import SinglePointCalculator
-
     from gradwave.opt.newton import newton_cg_relax
 
-    species, upfs, species_of_atom = _species_upfs(inp)
-    reason = _joint_supported(inp, upfs)
-    if reason is not None:
-        logger.info("relax method=newton not applicable: %s", reason)
-        return None
-
-    cell0 = inp.atoms.cell.array.copy()
-    pos0 = inp.atoms.get_positions().copy()
-    fix_cell = not inp.relax.cell
-    omega = float(abs(np.linalg.det(cell0)))
-    smax = inp.relax.fmax / omega
-    try:
-        res = newton_cg_relax(
+    def _engine(cell0: Any, pos0: Any, species_of_atom: Any, upfs: Any,
+                smax: float, fix_cell: bool) -> Any:
+        return newton_cg_relax(
             cell0, pos0, species_of_atom, upfs, XC_REGISTRY[inp.xc](),
             ecut=inp.ecut, kmesh=inp.kpoints.mesh, fmax=inp.relax.fmax,
             smax=smax, max_newton=inp.relax.max_steps, fix_cell=fix_cell,
             device=inp.device, verbose=verbose,
         )
-    except (ValueError, RuntimeError) as exc:  # torch LinAlgError ⊂ RuntimeError
-        logger.warning("newton relax failed (%s); falling back to nested", exc)
-        return None
-    if not res.converged:
-        logger.info("newton relax did not converge (%d Newton steps); falling "
-                    "back", res.n_newton)
-        return None
 
-    atoms = inp.atoms.copy()
-    atoms.set_cell(res.cell, scale_atoms=False)
-    atoms.set_positions(res.positions)
-    atoms.calc = _build_relax_calc(inp, verbose)
-    energy = float(atoms.get_potential_energy())
-    forces = atoms.get_forces()
-    fmax_final = float(np.linalg.norm(forces, axis=1).max())
-    sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
-    if inp.relax.cell:
-        sp_kw["stress"] = atoms.get_stress()
-    frame = atoms.copy()
-    frame.calc = SinglePointCalculator(frame, **sp_kw)
-    frame.info["step"] = res.n_newton
-    last = getattr(atoms.calc, "last_result", None)
-
-    relax: dict[str, Any] = {
-        "converged": True,
-        "method": "newton",
-        "n_steps": res.n_cycles,
-        "n_newton": res.n_newton,
-        "n_grad": res.n_grad,
-        "n_hvp": res.n_hvp,
-        "optimizer": "steihaug-newton-cg",
-        "cell_relaxed": bool(inp.relax.cell),
-        "fmax_target_eV_ang": inp.relax.fmax,
-        "energy_eV": energy,
-        "fmax_eV_ang": fmax_final,
-        "max_displacement_ang": float(np.linalg.norm(
-            atoms.get_positions() - inp.atoms.get_positions(), axis=1).max()),
-        "species": atoms.get_chemical_symbols(),
-        "positions_ang": atoms.get_positions().tolist(),
-        "cell_ang": atoms.cell.array.tolist(),
-        "volume_ang3": float(atoms.get_volume()),
-        "h_applies": int(res.h_equiv),
-        "h_seed": int(res.h_seed),
-    }
-    if last is not None:
-        relax["scf_iter_final"] = int(getattr(last, "n_iter", 0))
-        if getattr(last, "system", None) is not None:
-            relax["nk_ibz"] = len(last.system.kweights)
-    if inp.relax.cell:
-        relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
-        relax["pressure_GPa"] = inp.relax.pressure
-    if verbose:
-        print(f"  relax: newton-cg engine converged — E = {energy:+.8f} eV · "
-              f"fmax = {fmax_final:.5f} eV/Å · {res.n_newton} steps · "
-              f"{res.n_hvp} Hvp · {res.h_equiv} H-applies", flush=True)
-    return relax, atoms, [frame]
+    return _relax_second_order(
+        inp, verbose, method="newton", engine_call=_engine,
+        frame_step=lambda res: res.n_newton,
+        nonconverged_msg=lambda res: (
+            f"newton relax did not converge ({res.n_newton} Newton steps); "
+            "falling back"),
+        provenance=lambda res: {
+            "n_newton": res.n_newton,
+            "n_grad": res.n_grad,
+            "n_hvp": res.n_hvp,
+            "optimizer": "steihaug-newton-cg",
+        },
+        summary_line=lambda res, energy, fmax_final: (
+            f"  relax: newton-cg engine converged — E = {energy:+.8f} eV · "
+            f"fmax = {fmax_final:.5f} eV/Å · {res.n_newton} steps · "
+            f"{res.n_hvp} Hvp · {res.h_equiv} H-applies"),
+    )
