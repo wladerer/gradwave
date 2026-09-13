@@ -12,6 +12,7 @@ case "$phase" in
   mdf)  # S4 glue retune: subspace depth (restart cadence)
     for c in si2 al4 fe1 al32; do
       for s in davidson davidson-native; do
+        [ "$c" = al32 ] && [ "$s" = davidson ] && continue  # 390 s/rep — skip
         for f in 2 3 4 6; do
           echo "### case=$c solver=$s mdf=$f"
           GRADWAVE_MAX_DIM_FACTOR=$f uv run python $L time $c $s 3
@@ -37,6 +38,7 @@ case "$phase" in
   chord)  # S6 chord / frozen-C tail
     for c in si2 al4 fe1 al32; do
       for s in davidson-native davidson; do
+        [ "$c" = al32 ] && [ "$s" = davidson ] && continue  # 390 s/rep — skip
         for m in 0 30 100; do
           echo "### case=$c solver=$s chord=$m"
           if [ "$m" = 0 ]; then uv run python $L time $c $s 3
