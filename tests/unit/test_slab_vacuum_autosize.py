@@ -13,10 +13,12 @@ import numpy as np
 import pytest
 from ase import Atoms
 
+from gradwave.api import trim_slab_vacuum
 from gradwave.api._slab import (
     _axis_vacuum_gaps,
     _npw_estimate,
     resolve_slab_box,
+    resolve_slab_box_geom,
     size_box_from_planar_density,
 )
 from gradwave.inputs import Input, InputError, KPointsParams, SCFParams, SlabParams
@@ -251,6 +253,92 @@ def test_slabparams_rejects_bad_target():
 def test_slabparams_rejects_nonpositive_tol():
     with pytest.raises(InputError):
         SlabParams(vacuum_tol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# ASE-facing trim_slab_vacuum helper (the calculator/adsorbate-workflow path)
+# ---------------------------------------------------------------------------
+def _al_slab_atoms(c=32.0):
+    a = 4.05
+    return Atoms(
+        "Al3", cell=[a / np.sqrt(2), a / np.sqrt(2), c], pbc=True,
+        positions=[[0, 0, 10.0], [0, 0, 12.0], [0, 0, 14.0]])
+
+
+def test_trim_helper_matches_resolve_geom():
+    """The ASE helper is a thin shell over the shared geometry core: same trimmed
+    cell/positions as resolve_slab_box_geom on the same slab."""
+    atoms = _al_slab_atoms()
+    trimmed = trim_slab_vacuum(
+        atoms, {"Al": ALUPF}, 300.0, boundary="open_z", target="energy",
+        npw_gate=0)
+    box = resolve_slab_box_geom(
+        atoms.cell.array, atoms.get_positions(), boundary="open_z", ecut=300.0,
+        upfs=[_load()], species_of_atom=[0, 0, 0], vacuum_autosize=True,
+        vacuum_target="energy", npw_gate=0)
+    assert box.trimmed is True
+    assert trimmed.cell.array[2, 2] == pytest.approx(box.length_after, abs=1e-9)
+    assert trimmed.cell.array[2, 2] < 32.0
+    assert np.allclose(trimmed.get_positions(), box.positions)
+    assert trimmed.get_chemical_symbols() == atoms.get_chemical_symbols()
+
+
+def test_trim_helper_noop_periodic_returns_input():
+    """A plain-periodic boundary is not box-independent, so the helper never
+    trims (returns the input unchanged)."""
+    atoms = _al_slab_atoms()
+    out = trim_slab_vacuum(
+        atoms, {"Al": ALUPF}, 300.0, boundary="periodic", npw_gate=0)
+    assert out is atoms
+    assert np.allclose(out.cell.array, atoms.cell.array)
+
+
+def test_trim_helper_noop_below_npw_gate_returns_input():
+    """Below the arithmetic gate the box is left alone (latency-bound)."""
+    atoms = _al_slab_atoms()
+    out = trim_slab_vacuum(atoms, {"Al": ALUPF}, 40.0, boundary="open_z")
+    assert out is atoms
+
+
+def test_trim_helper_carries_constraints_and_tags():
+    """FixAtoms / add_adsorbate tags survive the trim so an ASE relaxation keeps
+    working unchanged in the smaller box."""
+    from ase.constraints import FixAtoms
+    atoms = _al_slab_atoms()
+    atoms.set_tags([0, 0, 1])
+    atoms.set_constraint(FixAtoms(indices=[0, 1]))
+    trimmed = trim_slab_vacuum(
+        atoms, {"Al": ALUPF}, 300.0, boundary="open_z", target="energy",
+        npw_gate=0)
+    assert list(trimmed.get_tags()) == [0, 0, 1]
+    assert len(trimmed.constraints) == 1
+    assert list(trimmed.constraints[0].get_indices()) == [0, 1]
+
+
+def test_trim_tolerance_is_monotone_on_realistic_slab():
+    """The trim is a controllable box-size/accuracy knob: a looser tail tolerance
+    keeps less vacuum. On a realistic Al(100) 2x2x3 slab the trimmed open-axis
+    length is monotone non-increasing in ``vacuum_tol`` (1e-5 → 1e-4 → 1e-3).
+    Pure geometry, no SCF.
+
+    Context (measured 2026-09-13): this slab DOES trim at the default 1e-4 tol,
+    and the trim is not energy-exact — the diffuse SAD tail of a light metal plus
+    the fixed-ecut grid re-sampling shift the converged energy by tens+ meV/atom.
+    The trim is an approximation the caller tunes here, not a free win (see the
+    docstrings and ``test_esm_scf`` guards)."""
+    from ase.build import fcc111
+    slab = fcc111("Al", size=(2, 2, 3), a=4.05, vacuum=10.0, orthogonal=False)
+    cell, pos = np.array(slab.cell), np.array(slab.get_positions())
+    lengths = []
+    for tol in (1e-5, 1e-4, 1e-3):
+        box = resolve_slab_box_geom(
+            cell, pos, boundary="open_z", ecut=300.0, upfs=[_load()],
+            species_of_atom=[0] * len(slab), vacuum_autosize=True,
+            vacuum_tol=tol, npw_gate=0)
+        # length_after is meaningful whether or not it trimmed (== before if not)
+        lengths.append(box.length_after if box.trimmed else box.length_before)
+    assert lengths[0] >= lengths[1] >= lengths[2]  # looser tol → smaller box
+    assert lengths[2] < float(np.linalg.norm(cell[2]))  # the loose cut does fire
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from gradwave.core.xc.spin import SpinXC
 from gradwave.inputs import Input
 
 if TYPE_CHECKING:
+    from ase import Atoms
 
     from gradwave.core.hubbard import HubbardManifold
     from gradwave.grids import FFTGrid
@@ -176,6 +177,89 @@ def build_system(inp: Input) -> System | USPPSystem:
         use_symmetry=inp.symmetry and not hybrid and not hubbard,
         time_reversal=not hybrid and time_reversal_ok(inp),
     )
+
+
+def trim_slab_vacuum(
+    atoms: Atoms,
+    pseudopotentials: dict[str, str],
+    ecut: float,
+    *,
+    boundary: str = "open_z",
+    target: str = "energy",
+    min_vacuum: float = 3.0,
+    vacuum_tol: float | None = None,
+    vacuum_margin: float | None = None,
+    npw_gate: int = 8000,
+    vacuum_fraction_gate: float = 0.3,
+) -> Atoms:
+    """Return a copy of ``atoms`` with the open (vacuum) axis trimmed to the SAD
+    density tail — the ASE-facing entry to the slab vacuum auto-sizer.
+
+    Under an open-boundary (ESM) run the vacuum-normal electrostatics are
+    box-independent *where the density has decayed to zero at the box edge*, so
+    excess vacuum beyond the physical tail is FFT/plane-wave waste. Call this once
+    on a slab (or slab+adsorbate) built with generous vacuum, then hand the
+    returned Atoms to :class:`~gradwave.calculator.GradWave` with the *same*
+    ``boundary`` and ``ecut``: every downstream SCF, force and (fixed-cell)
+    relaxation step then runs in the smaller, consistent box. The trim is a
+    forward hyperparameter (set once, frozen for the solve, like ``ecut``) — the
+    vacuum-normal stress is meaningless for a slab, so there is no
+    autograd/relaxation coupling as long as the cell is held fixed.
+
+    **This is a controllable approximation, not an exact transform.** The box
+    edge is placed where the *SAD* planar density falls below ``vacuum_tol``;
+    trimming more aggressively (a looser ``vacuum_tol``, needed before the box
+    actually shrinks for a diffuse-tail material like Al) moves the ESM boundary
+    into non-zero density and shifts the total energy — measured on Al: ~tens of
+    meV/atom at a ~2× npw cut, hundreds of meV/atom to > 1 eV beyond. Validate
+    the energy error for your material and pick ``vacuum_tol`` for the box-size /
+    accuracy tradeoff you want. The default (``target="energy"`` → 1e-4 e/Å³) is
+    conservative — for a light delocalised metal it often declines to trim rather
+    than corrupt the energy. Returns the input unchanged (no trim) unless
+    ``boundary`` is open *and* both gates pass (arithmetic-bound
+    ``npw ≳ npw_gate``, vacuum-dominated ``vacuum_fraction ≳ vacuum_fraction_gate``).
+    ``target="workfunction"`` uses the conservative plateau-limited margin.
+
+    ``ecut`` is in eV (the same units the ASE calculator takes). Mirrors the
+    ``slab.vacuum_autosize`` knob on the ``Input``/api path (``api._slab``)."""
+    from ase import Atoms as _Atoms
+
+    symbols = atoms.get_chemical_symbols()
+    species = sorted(set(symbols))
+    upfs = [_load_upf(pseudopotentials[s]) for s in species]
+    species_of_atom = [species.index(s) for s in symbols]
+
+    from gradwave.api._slab import resolve_slab_box_geom
+
+    box = resolve_slab_box_geom(
+        atoms.cell.array,
+        atoms.get_positions(),
+        boundary=boundary,
+        ecut=ecut,
+        upfs=upfs,
+        species_of_atom=species_of_atom,
+        vacuum_autosize=True,
+        vacuum_target=target,
+        vacuum_tol=vacuum_tol,
+        vacuum_margin=vacuum_margin,
+        min_vacuum=min_vacuum,
+        npw_gate=npw_gate,
+        vacuum_fraction_gate=vacuum_fraction_gate,
+    )
+    if not box.trimmed:
+        logger.info("trim_slab_vacuum: no trim (%s)", box.reason)
+        return atoms
+    trimmed = _Atoms(
+        symbols=symbols,
+        positions=box.positions,
+        cell=box.cell,
+        pbc=atoms.pbc,
+    )
+    # carry constraints/tags/momenta so an ASE relaxation (FixAtoms on the slab,
+    # add_adsorbate tags) keeps working unchanged in the trimmed box.
+    trimmed.set_constraint(atoms.constraints)
+    trimmed.set_tags(atoms.get_tags())
+    return trimmed
 
 
 def _spin_setup(inp: Input) -> tuple[SpinXC, list[float]]:

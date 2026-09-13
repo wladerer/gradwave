@@ -1,32 +1,46 @@
 """Density-tail vacuum auto-sizer for open-boundary (ESM) slabs.
 
 ESM (``boundary="open_z"`` / ``"open_z_metal"``) makes the open-axis
-electrostatics box-independent: the vacuum no longer has to be wide enough to
-*decouple periodic images*, only wide enough to *hold the physical density
-tail*. A habitual 10–20 Å/face of vacuum is then pure waste. Trimming the open
-(c) axis to just the SAD density tail plus a margin cuts **both** the FFT box
-length ``Nz`` and the plane-wave count ``npw`` — both scale ~linearly with the
-open-axis length ``L_z`` (``grids.build_fft_grid`` sizes each dimension from the
-Miller extent of the density sphere; ``build_gsphere`` keeps ``|k+G|² ≤ ecut``,
-whose count is ``∝ Ω``) — so the FFT H-apply and the O(nb²·npw) Rayleigh–Ritz
-shrink together.
+electrostatics box-independent *only where the density has genuinely decayed to
+zero at the box edge* — the open 1D Green's function is applied at the boundary
+planes, so if real charge still sits there the open-vs-periodic split is wrong
+and the total energy shifts. The vacuum therefore has to be wide enough to hold
+the physical density tail; a habitual 10–20 Å/face is often more than that, and
+the excess is FFT/plane-wave waste. Trimming the open (c) axis toward the SAD
+density tail cuts **both** the FFT box length ``Nz`` and the plane-wave count
+``npw`` — both scale ~linearly with the open-axis length ``L_z``
+(``grids.build_fft_grid`` sizes each dimension from the Miller extent of the
+density sphere; ``build_gsphere`` keeps ``|k+G|² ≤ ecut``, whose count is
+``∝ Ω``) — so the FFT H-apply and the O(nb²·npw) Rayleigh–Ritz shrink together.
+
+**This is a controllable approximation, not an exact transform.** The trim
+boundary is placed where the *SAD* (superposition-of-atomic) planar density
+falls below ``vacuum_tol``. SAD tails are diffuse (isolated-atom valence
+orbitals extend far), so the mapping from ``vacuum_tol`` to a safe box is
+material-dependent and *measured*, not free: on an Al slab, trimming to a
+``~2×`` npw cut costs on the order of tens of meV/atom, and more aggressive cuts
+cost hundreds of meV/atom to > 1 eV (they move the ESM boundary into non-zero
+density). The energy error must be characterised per material; the caller trades
+box size against accuracy through ``vacuum_tol``. The default (see
+``_TARGET_DEFAULTS``) is deliberately conservative so it declines to trim rather
+than corrupt the energy — for a light delocalised metal like Al it is often a
+near no-op.
 
 The box is a **forward hyperparameter** — set once, before any SCF step, and
-frozen for the whole solve, exactly like ``ecut``. The vacuum-normal stress is
-physically meaningless for a slab, so there is no autograd interaction: no
-mid-SCF basis change, no adjoint coupling. This module resolves the trimmed
-``(cell, positions)`` from a superposition-of-atomic-densities (SAD) profile —
-no SCF is run.
+frozen for the whole solve, like ``ecut``. The vacuum-normal stress is
+physically meaningless for a slab, so there is no autograd interaction. This
+module resolves the trimmed ``(cell, positions)`` from the SAD profile — no SCF
+is run.
 
 Two disciplines set the margin, keyed to the requested observable:
 
-* **energy / forces** are *tail-limited* — the total energy stops moving once
-  the density that spills into the vacuum is captured, so an aggressive
-  ``ρ < ~1e-4 e/Å³`` cut with a thin margin suffices.
-* **work function / dipole** are *plateau-limited* — ``postscf.work_function.
-  vacuum_level`` reads ``v_eff`` on the lowest-density open-axis planes and
-  needs a flat vacuum plateau there, so the margin is larger (a conservative
-  default).
+* **energy / forces** — a ``ρ < 1e-4 e/Å³`` cut with a thin margin. Conservative
+  in tail *location* (SAD overestimates the tail), but note the caveat above:
+  actually reaching a box that saves plane waves needs a looser cut, which is
+  where the energy error appears.
+* **work function / dipole** — ``postscf.work_function.vacuum_level`` reads
+  ``v_eff`` on the lowest-density open-axis planes and needs a flat vacuum
+  plateau, so the margin is larger (the conservative default).
 
 Gates (a slab satisfies them, a small bulk-ish cell does not): only trim when
 the run is arithmetic-bound (``npw ≳ npw_gate``) and genuinely vacuum-dominated
@@ -249,30 +263,42 @@ def _sad_planar_density(
     return rho.mean(dim=other).detach().cpu().numpy()
 
 
-def resolve_slab_box(
-    inp: Input,
+def resolve_slab_box_geom(
+    cell: np.ndarray,
+    positions: np.ndarray,
+    *,
+    boundary: str,
+    ecut: float,
     upfs: Sequence[UPFData | PAWData],
     species_of_atom: Sequence[int],
+    vacuum_autosize: bool,
+    vacuum_target: str = "workfunction",
+    vacuum_tol: float | None = None,
+    vacuum_margin: float | None = None,
+    min_vacuum: float = 3.0,
+    npw_gate: int = 8000,
+    vacuum_fraction_gate: float = 0.3,
 ) -> SlabBox:
-    """Resolve the (possibly trimmed) slab box for ``inp``.
+    """Pure-geometry slab-box resolver — the shared core of the api driver path
+    (:func:`resolve_slab_box`, which reads these fields off an ``Input``) and the
+    ASE-facing :func:`trim_slab_vacuum`.
 
-    A no-op (returns the original cell/positions, ``trimmed=False``) unless the
-    slab auto-sizer is enabled *and* the boundary is an open (ESM) one *and* both
+    A no-op (returns the original cell/positions, ``trimmed=False``) unless
+    ``vacuum_autosize`` is set *and* ``boundary`` is an open (ESM) one *and* both
     gates pass. Never runs an SCF — the tail comes from the SAD density."""
-    cell = np.asarray(inp.atoms.cell.array, dtype=np.float64).reshape(3, 3)
-    positions = np.asarray(inp.atoms.get_positions(), dtype=np.float64).reshape(-1, 3)
-    slab = inp.slab
-    npw = _npw_estimate(cell, inp.ecut)
+    cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    npw = _npw_estimate(cell, ecut)
 
     def noop(reason: str, axis: int | None = None) -> SlabBox:
         return SlabBox(cell, positions, False, axis, float(np.linalg.norm(cell[axis]))
                        if axis is not None else 0.0, 0.0, npw, reason)
 
-    if not slab.vacuum_autosize:
+    if not vacuum_autosize:
         return noop("vacuum_autosize off")
-    if inp.scf.boundary not in ("open_z", "open_z_metal"):
+    if boundary not in ("open_z", "open_z_metal"):
         return noop(
-            f"boundary={inp.scf.boundary!r} is not an open (ESM) boundary — "
+            f"boundary={boundary!r} is not an open (ESM) boundary — "
             "auto-size only trims when the open-axis electrostatics are box-"
             "independent")
 
@@ -282,27 +308,27 @@ def resolve_slab_box(
     length = float(lengths[axis])
     vac_frac = float(gaps[axis] / length) if length > 0 else 0.0
 
-    if npw < slab.npw_gate:
+    if npw < npw_gate:
         return noop(
-            f"npw≈{npw} < gate {slab.npw_gate} — latency-bound, trimming pointless",
+            f"npw≈{npw} < gate {npw_gate} — latency-bound, trimming pointless",
             axis)
-    if vac_frac < slab.vacuum_fraction_gate:
+    if vac_frac < vacuum_fraction_gate:
         return noop(
-            f"vacuum fraction {vac_frac:.2f} < gate {slab.vacuum_fraction_gate} — "
+            f"vacuum fraction {vac_frac:.2f} < gate {vacuum_fraction_gate} — "
             "not vacuum-dominated (bulk-ish); leaving box",
             axis)
 
-    rho_tol, margin = _TARGET_DEFAULTS[slab.vacuum_target]
-    if slab.vacuum_tol is not None:
-        rho_tol = slab.vacuum_tol
-    if slab.vacuum_margin is not None:
-        margin = slab.vacuum_margin
+    rho_tol, margin = _TARGET_DEFAULTS[vacuum_target]
+    if vacuum_tol is not None:
+        rho_tol = vacuum_tol
+    if vacuum_margin is not None:
+        margin = vacuum_margin
 
     rho_planar = _sad_planar_density(
-        cell, positions, species_of_atom, upfs, inp.ecut, axis)
+        cell, positions, species_of_atom, upfs, ecut, axis)
     new_cell, new_pos, info = size_box_from_planar_density(
         cell, positions, rho_planar, axis,
-        rho_tol=rho_tol, margin=margin, min_vacuum=slab.min_vacuum)
+        rho_tol=rho_tol, margin=margin, min_vacuum=min_vacuum)
 
     length_after = float(info.get("length_after", length))  # ty: ignore[invalid-argument-type]
     reason = str(info["reason"])
@@ -310,15 +336,42 @@ def resolve_slab_box(
     if trimmed and info.get("hit_floor"):
         warnings.warn(
             "slab vacuum auto-size: the density tail wanted less vacuum than the "
-            f"{slab.min_vacuum:.1f} Å/face safety floor; box floored at the safety "
-            "minimum. Lower slab.min_vacuum only if you know the tail is captured.",
+            f"{min_vacuum:.1f} Å/face safety floor; box floored at the safety "
+            "minimum. Lower min_vacuum only if you know the tail is captured.",
             stacklevel=2)
     if trimmed:
         logger.info(
             "slab vacuum auto-size (%s): open axis %d, %.2f → %.2f Å, "
             "npw≈%d (was for the original box); %s",
-            slab.vacuum_target, axis, length, length_after, npw, reason)
+            vacuum_target, axis, length, length_after, npw, reason)
     return SlabBox(
         new_cell if trimmed else cell,
         new_pos if trimmed else positions,
         trimmed, axis, length, length_after, npw, reason)
+
+
+def resolve_slab_box(
+    inp: Input,
+    upfs: Sequence[UPFData | PAWData],
+    species_of_atom: Sequence[int],
+) -> SlabBox:
+    """Resolve the (possibly trimmed) slab box for ``inp`` (api driver path).
+
+    Thin wrapper over :func:`resolve_slab_box_geom` reading the box, boundary and
+    ``slab.*`` knobs off the ``Input``."""
+    slab = inp.slab
+    return resolve_slab_box_geom(
+        np.asarray(inp.atoms.cell.array, dtype=np.float64).reshape(3, 3),
+        np.asarray(inp.atoms.get_positions(), dtype=np.float64).reshape(-1, 3),
+        boundary=inp.scf.boundary,
+        ecut=inp.ecut,
+        upfs=upfs,
+        species_of_atom=species_of_atom,
+        vacuum_autosize=slab.vacuum_autosize,
+        vacuum_target=slab.vacuum_target,
+        vacuum_tol=slab.vacuum_tol,
+        vacuum_margin=slab.vacuum_margin,
+        min_vacuum=slab.min_vacuum,
+        npw_gate=slab.npw_gate,
+        vacuum_fraction_gate=slab.vacuum_fraction_gate,
+    )

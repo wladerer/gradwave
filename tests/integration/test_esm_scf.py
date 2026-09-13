@@ -120,6 +120,40 @@ def test_open_z_al_slab_scf_runs_clean():
 
 
 @pytest.mark.standard
+def test_open_z_vacuum_trim_energy_shift_is_measurable_not_exact():
+    """The vacuum trim is a controllable APPROXIMATION, not an exact transform.
+
+    ESM box-independence only holds where the density is ~0 at the box edge, and
+    at fixed ecut a shorter box also re-samples the FFT grid (different dz). Both
+    effects are real: forcing an Al ESM slab from a generous box into a
+    substantially trimmed one shifts the converged total energy by a
+    *measurable* amount (tens to hundreds of meV/atom on Al, measured
+    2026-09-13), not by ~0. This guards against ever re-labelling the trim
+    "exact": if this assertion starts finding ΔE ≈ 0 for a large box change, the
+    physics changed and the docs/claims must be revisited.
+
+    (``test_slab_vacuum_autosize.test_trim_tolerance_is_monotone_on_realistic_slab``
+    characterises the tol→box knob on a realistic slab. This test deliberately
+    forces an aggressive trim to exhibit the resulting energy error.)"""
+    al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
+    a = 4.05 / np.sqrt(2.0)
+    cell = np.diag([a, a, 30.0])
+    pos = np.array([[0.0, 0.0, 13.0], [0.0, 0.0, 15.0], [0.0, 0.0, 17.0]])
+    common = dict(smearing="gaussian", width=0.2, etol=1e-7, rhotol=1e-6,
+                  max_iter=150, verbose=False)
+
+    e_full = float(scf(setup_system(cell, pos, [0, 0, 0], [al], ecut=20 * RY),
+                       LDA_PW92(), boundary="open_z", **common).energies.total)
+    # force an aggressive trim (well past the safe default) to expose the error
+    cell_t = np.diag([a, a, 15.0])
+    pos_t = np.array([[0.0, 0.0, 5.5], [0.0, 0.0, 7.5], [0.0, 0.0, 9.5]])
+    e_trim = float(scf(setup_system(cell_t, pos_t, [0, 0, 0], [al], ecut=20 * RY),
+                       LDA_PW92(), boundary="open_z", **common).energies.total)
+    # the shift is real and non-negligible — NOT exact
+    assert abs(e_trim - e_full) > 5e-2
+
+
+@pytest.mark.standard
 def test_open_z_metal_capacitor_scf_and_bias():
     """The metal/capacitor mode (boundary=open_z_metal) runs end-to-end: the SCF
     converges, the loop ΔE matches the standalone capacitor energy on the

@@ -30,6 +30,7 @@ from ase.build import add_adsorbate, fcc111
 from ase.constraints import FixAtoms
 from ase.optimize import BFGS
 
+from gradwave.api import trim_slab_vacuum
 from gradwave.calculator import GradWave
 
 RY = 13.605693122994
@@ -66,8 +67,23 @@ def co_molecule():
     return Atoms("CO", positions=[[0, 0, 0], [0, 0, CO_D]])
 
 
+def _trim(slab):
+    """Shrink the (generous) vacuum toward the SAD density tail under open_z (ESM).
+
+    ESM's open-axis electrostatics are box-independent where the density has
+    decayed to ~0 at the edge, so vacuum beyond the physical tail is FFT/plane-wave
+    waste. The trim is a *controllable approximation*, not free: at the
+    conservative default it may decline to trim (Pt's semicore density is more
+    compact than Al's, so it can trim more), and a looser vacuum_tol trades box
+    size for a measurable energy shift — validate before trusting an aggressive
+    cut. The cell stays fixed for the rigid-substrate relaxation; no-op if a gate
+    fails."""
+    return trim_slab_vacuum(slab, PSEUDOS, ECUT, boundary="open_z", target="energy")
+
+
 def build_slab(a0):
     slab = fcc111("Pt", size=(2, 2, 3), a=a0, vacuum=7.5, orthogonal=False)
+    slab = _trim(slab)
     slab.set_constraint(FixAtoms(mask=[True] * len(slab)))  # rigid substrate
     return slab
 
@@ -76,6 +92,7 @@ def build_slab_co(a0, site):
     slab = fcc111("Pt", size=(2, 2, 3), a=a0, vacuum=7.5, orthogonal=False)
     n_pt = len(slab)
     add_adsorbate(slab, co_molecule(), height=HEIGHT, position=site, mol_index=0)
+    slab = _trim(slab)
     # freeze all Pt, relax only C and O
     slab.set_constraint(FixAtoms(indices=list(range(n_pt))))
     return slab

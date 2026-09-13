@@ -42,6 +42,7 @@ from gradwave.api.surface_energy import run_surface_energy as run_surface_energy
 from gradwave.api.system import _is_uspp as _is_uspp
 from gradwave.api.system import _load_upf as _load_upf
 from gradwave.api.system import build_system as build_system
+from gradwave.api.system import trim_slab_vacuum as trim_slab_vacuum
 from gradwave.api.thermochem import (
     adsorption_free_energy as adsorption_free_energy,
 )
@@ -94,4 +95,5 @@ __all__ = [
     "run_scf",
     "run_surface_energy",
     "run_thermochem",
+    "trim_slab_vacuum",
 ]
