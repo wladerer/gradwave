@@ -684,21 +684,8 @@ def davidson_batched(
     force_dim_factor: int | None = None,
     subspace_budget_gb: float | None = None,
     subspace_storage: str | None = None,
-    n_gate: int | None = None,
-    n_add_cap: int | None = None,
 ) -> BatchedDavidsonResult:
     """Batched block Davidson over all k at once (the workhorse solver).
-
-    ``n_gate`` (opt-in, default None = all bands): judge convergence and select
-    expansion directions over only the lowest ``n_gate`` Ritz pairs; the
-    remaining ``nb - n_gate`` rows are seed-buffer bands that ride the
-    Rayleigh-Ritz (improving the subspace span) but are never themselves
-    polished to tol or expanded — the thick-Ritz-buffer probe
-    (``GRADWAVE_RITZ_TAIL`` in scf.loop). The returned block keeps the full
-    width; callers slice. ``n_add_cap`` (opt-in) caps the number of expansion
-    directions per round (the glue-retune sweep knob; fewer, deeper rounds).
-    Both are exact: they change the iteration path, never the converged
-    contract (rn <= tol on every gated band).
 
     ``force_dim_factor`` / ``subspace_budget_gb`` / ``subspace_storage`` are
     the ``scf.memory`` subspace knobs threaded as explicit arguments (Input →
@@ -737,14 +724,6 @@ def davidson_batched(
     CPU-offload pattern issue #133 used for the subspace eigh; it needs no
     flag and is not conditioned on sync_free."""
     nk, nb, m = x0.shape
-    # Gated band count: convergence/expansion judged on the lowest ng Ritz
-    # pairs only (eigh returns ascending, so [:ng] IS the wanted set).
-    ng = nb if n_gate is None else max(1, min(int(n_gate), nb))
-    # env override layered over the argument, read per solve (post-#484
-    # pattern; benchmark/sweep access without threading a new argument chain)
-    _cap_env = os.environ.get("GRADWAVE_DAV_NADD_CAP", "").strip()
-    if _cap_env:
-        n_add_cap = int(_cap_env)
     # Subspace-footprint knobs (see the module note above this function). Storage
     # dtype and the resolved max_dim_factor set the V/HV byte peak. `m` is the
     # padded plane-wave count (npw_max), the long axis of V/HV.
@@ -910,7 +889,7 @@ def davidson_batched(
             history_out.append((it, rn.detach().to("cpu").clone(),
                                 eig.detach().to("cpu").clone()))
         if not sync_free:
-            if float(rn[:, :ng].max()) < tol:
+            if float(rn.max()) < tol:
                 return _result(eig, x, it, rn)
             if it == max_iter:
                 # the final round's expansion (H-applies + ortho) is never
@@ -920,9 +899,7 @@ def davidson_batched(
             # expand with the worst unconverged residuals only — uniform
             # count across k (max over k of the per-k unconverged tally)
             # keeps batching
-            n_add = int((rn[:, :ng] > tol).sum(dim=1).max())
-            if n_add_cap is not None:
-                n_add = max(1, min(n_add, int(n_add_cap)))
+            n_add = int((rn > tol).sum(dim=1).max())
         else:
             # judge the stats copy launched in an earlier round; query()
             # never blocks, and the returned (eig, x) are the CURRENT
@@ -952,7 +929,7 @@ def davidson_batched(
                     ev.record()
                 pending = True
             n_add = n_add_cur
-        sel = torch.argsort(rn[:, :ng], dim=1, descending=True)[:, :n_add]  # (nk, n_add)
+        sel = torch.argsort(rn, dim=1, descending=True)[:, :n_add]  # (nk, n_add)
         r_sel = torch.gather(r, 1, sel[..., None].expand(-1, -1, m))
 
         t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), t.to(x.dtype), x).real

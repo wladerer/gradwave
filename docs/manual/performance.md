@@ -392,6 +392,25 @@ to leave on.
 These were built or measured and gave no gain. They are here so no one spends the
 time again.
 
+- **The 2026-09 "perf survivors" close-out (six vetted-but-unmeasured
+  small-cell ideas, all measured on the graded Si2/Al-4/Fe-1/Al-32/Si-64
+  set; decision records [D-010]-[D-015] in docs/design/decision-records.md).**
+  Per-band diago tolerance and orbital extrapolation: already closed by prior
+  measurement (the eager solver already expands only unconverged worst bands;
+  the native solver retires converged k-points; the SCF is mixing-dominated).
+  Transform dedup (density-build <-> warm-apply FFT reuse): Amdahl-gated out --
+  the dedupable slice is 2-4% of eager wall, ~1% native. Chord/frozen-C tail
+  (single-RR solves once the density residual is deep in the tail): the one
+  regime win is Al-32 native at ~1.09x; every small cell LOSES (frozen-C
+  density response costs more outer iterations than the cheap solves save)
+  and Si-64 is a null -- parked. Thick Ritz buffer across outer iterations:
+  cuts H-applies 8-14% but only wins on the eager arm of small insulators
+  (Si2 1.14x), loses on Al-4 -- parked. Davidson glue retune: `max_dim_factor`
+  4 confirmed (metals mildly prefer 3 on the native path, ~1.09x, tune via
+  `scf.memory.max_dim_factor` if you care); an expansion-width cap is
+  iteration-count roulette. The one piece that shipped: `davidson_batched`
+  now skips the never-consumed final-round expansion at `it == max_iter`
+  (byte-identical results, strictly fewer applies on max_iter-limited solves).
 - **A structural GPU rewrite for small systems.** The small-system GPU gap is fp64
   precision, not launch latency or eager-mode overhead. See the GPU section.
 - **Ozaki-scheme emulated-fp64 GEMM for the CUDA Toeplitz local apply (built and
