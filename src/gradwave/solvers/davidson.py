@@ -740,6 +740,11 @@ def davidson_batched(
     # Gated band count: convergence/expansion judged on the lowest ng Ritz
     # pairs only (eigh returns ascending, so [:ng] IS the wanted set).
     ng = nb if n_gate is None else max(1, min(int(n_gate), nb))
+    # env override layered over the argument, read per solve (post-#484
+    # pattern; benchmark/sweep access without threading a new argument chain)
+    _cap_env = os.environ.get("GRADWAVE_DAV_NADD_CAP", "").strip()
+    if _cap_env:
+        n_add_cap = int(_cap_env)
     # Subspace-footprint knobs (see the module note above this function). Storage
     # dtype and the resolved max_dim_factor set the V/HV byte peak. `m` is the
     # padded plane-wave count (npw_max), the long axis of V/HV.
