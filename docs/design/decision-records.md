@@ -313,25 +313,40 @@ and the code keeps a one-line greppable pointer.
   the shipping bar; revisit only if the native solver grows a seed-buffer
   interface AND the apply share climbs back above ~50% there.
 
-## [D-015] Davidson glue retune (subspace depth, expansion-width cap): defaults confirmed; no new knob
+## [D-015] Davidson glue retune: no expansion-width cap; eager default max_dim_factor=4 stands
 
-- **Date:** 2026-09 (survivors round) · **Status:** closed (defaults stand)
-- **Sites:** `solvers/davidson.py` (`max_dim_factor`, already user-facing via
+- **Date:** 2026-09 (survivors round) · **Status:** closed
+- **Sites:** `solvers/davidson.py` (`max_dim_factor`, user-facing via
   `scf.memory.max_dim_factor` / `GRADWAVE_MAX_DIM_FACTOR`); an expansion-width
   cap (`n_add_cap`) was probed and reverted (branch history, commit 3af4ebe4)
-- **Decision:** keep `max_dim_factor=4` as the default; do not add an
-  expansion-width cap. Tuning stays available through the existing
-  `scf.memory` knob for users chasing a specific config.
+- **Decision:** do not add an expansion-width cap; the EAGER solver keeps
+  `max_dim_factor=4`. The one robust finding — the native solver prefers 3 —
+  ships as the native adapter's default ([D-016]).
 - **Evidence (asus, 8 threads, min of 3 reps, factor 2/3/4/6):**
   n_add cap: iteration-count roulette, not a mechanism — Fe-1 eager
   38 iters → 24 (cap 2, 4.28 s LOSS) → 21 (cap 4, 2.73 s "win") → 41
   (cap 8, 3.67 s LOSS) vs 3.32 s baseline; Al-4 ±9%; Si2 null. The
   trajectory perturbation swamps the glue effect; nothing robust to ship.
-  max_dim_factor: Si2 native 0.47/0.47/0.47/0.46 (null; eager mildly
-  prefers 6: 0.96 vs 1.02), Al-4 native 5.10/4.26/4.28/5.93 (4≈3), Fe-1
-  native 2.62/2.01/2.19/2.53 (~1.09× at 3), Al-32 native
-  156/148/163–194/(6: see log) — metals mildly prefer 3, insulators are
-  flat, eager Al-4 regresses at 3 (16.3 vs 15.0 s). A ~9–10% metal-only,
-  native-only preference (confounded by late-session thermal drift on the
-  Al-32 arms) is below the shipping bar for a default flip; the knob
-  already exists for targeted use.
+  max_dim_factor on the eager path: Si2 0.96/1.06/1.02/0.96, Al-4
+  17.4/16.3/15.0/19.1 (4 best, 3 REGRESSES), Fe-1 5.8/3.6/3.3/3.1 —
+  no consistent winner ≠ 4.
+
+## [D-016] Native Davidson defaults to max_dim_factor=3 (eager stays 4)
+
+- **Date:** 2026-09 (survivors round) · **Status:** active
+- **Sites:** `src/gradwave/solvers/native_davidson.py`
+  (`native_davidson_adapter`, `max_dim_factor=None` → 3 native / 4 on any
+  eager fallback); overrides unchanged (`GRADWAVE_MAX_DIM_FACTOR` /
+  `scf.memory.max_dim_factor` layer over it in `_resolve_max_dim_factor`)
+- **Decision:** the native C solver's wall is subspace algebra
+  (Rayleigh-Ritz/ortho), not H-applies, so a shallower grown subspace —
+  more frequent but cheap restarts — wins where the solve is expensive and
+  is a null elsewhere. Exact by construction (restart cadence changes the
+  path, not the converged eigenpairs) and cuts the V/HV subspace bytes 25%.
+- **Evidence (asus, 8 threads; interleaved A/B for the headline pairs,
+  min of reps; E agreement 1e-10 or better):** Al-32 native 162.3/162.6 →
+  145.9/144.9 s (**1.12×**, same 13 iters), Si-64 15 Ry native 285.0 →
+  266.0 s (**1.07×**, 38 → 35 iters, same E), Fe-1 native 2.19 → 2.01 s
+  (1.09×), Si2 and Al-4 native null (0.467→0.469, 4.28→4.26). No native
+  config loses. The eager solver is NOT flipped: eager Al-4 regresses at 3
+  (15.0 → 16.3 s — larger apply share, deeper subspace amortizes it).

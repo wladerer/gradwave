@@ -227,7 +227,7 @@ def native_davidson_adapter(
     tol: float,
     nbands: int | None = None,
     max_iter: int = 40,
-    max_dim_factor: int = 4,
+    max_dim_factor: int | None = None,
     force_dim_factor: int | None = None,
     subspace_budget_gb: float | None = None,
     subspace_storage: str | None = None,
@@ -238,7 +238,20 @@ def native_davidson_adapter(
     The three subspace-memory kwargs mirror ``davidson_adapter``:
     ``subspace_storage=complex64`` is outside the native scope (falls back
     eager, where it applies); a forced/budgeted dim factor is honoured by the
-    native kernel via the shared ``_resolve_max_dim_factor``."""
+    native kernel via the shared ``_resolve_max_dim_factor``.
+
+    ``max_dim_factor=None`` (the default) resolves to 3 for the NATIVE solve
+    and 4 for any eager fallback. The native kernel's wall is subspace
+    algebra, not applies, so a shallower grown subspace (more frequent, cheap
+    restarts) wins where it matters and is a null elsewhere — measured on the
+    graded set (asus, 8 threads, interleaved A/B, min of reps): Al-32
+    162.5 -> 145.4 s (1.12x, same 13 iters, same E to 1e-10), Si-64 15 Ry
+    285.0 -> 266.0 s (1.07x, same E), Fe-1 2.19 -> 2.01 s, Si2 / Al-4 null;
+    V/HV subspace bytes drop 25% as a side effect. The eager solver keeps 4:
+    eager Al-4 REGRESSES at 3 (15.0 -> 16.3 s — its wall has a larger apply
+    share, and deeper subspaces amortize it). [D-016]
+    ``GRADWAVE_MAX_DIM_FACTOR`` / ``scf.memory.max_dim_factor`` still override
+    both (layered in ``_resolve_max_dim_factor``)."""
     from gradwave.solvers.registry import EigResult, davidson_adapter
 
     lib = _load()
@@ -251,7 +264,7 @@ def native_davidson_adapter(
     if reason is not None:
         r = davidson_adapter(apply_H, X0, precond, mask, tol=tol,
                              nbands=nbands, max_iter=max_iter,
-                             max_dim_factor=max_dim_factor,
+                             max_dim_factor=4 if max_dim_factor is None else max_dim_factor,
                              force_dim_factor=force_dim_factor,
                              subspace_budget_gb=subspace_budget_gb,
                              subspace_storage=subspace_storage, **kw)
@@ -266,7 +279,8 @@ def native_davidson_adapter(
     hub_q = h.hub_q
     nhub = int(hub_q.shape[1]) if hub_q is not None else 0
     max_dim_factor = _resolve_max_dim_factor(
-        nk, nb, m, X0.element_size(), max_dim_factor,
+        nk, nb, m, X0.element_size(),
+        3 if max_dim_factor is None else max_dim_factor,
         force=force_dim_factor, budget_gb=subspace_budget_gb)
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
 

@@ -405,12 +405,14 @@ time again.
   density response costs more outer iterations than the cheap solves save)
   and Si-64 is a null -- parked. Thick Ritz buffer across outer iterations:
   cuts H-applies 8-14% but only wins on the eager arm of small insulators
-  (Si2 1.14x), loses on Al-4 -- parked. Davidson glue retune: `max_dim_factor`
-  4 confirmed (metals mildly prefer 3 on the native path, ~1.09x, tune via
-  `scf.memory.max_dim_factor` if you care); an expansion-width cap is
-  iteration-count roulette. The one piece that shipped: `davidson_batched`
-  now skips the never-consumed final-round expansion at `it == max_iter`
-  (byte-identical results, strictly fewer applies on max_iter-limited solves).
+  (Si2 1.14x), loses on Al-4 -- parked. Davidson glue retune: an expansion-width cap is
+  iteration-count roulette; eager `max_dim_factor` 4 confirmed. Two pieces
+  DID ship: the native Davidson adapter now defaults to `max_dim_factor=3`
+  (its wall is subspace algebra, not applies — Al-32 1.12x, Si-64 1.07x,
+  Fe-1 1.09x, small cells null, exact, 25% smaller V/HV; eager keeps 4,
+  which is faster there; [D-016]), and `davidson_batched` skips the
+  never-consumed final-round expansion at `it == max_iter` (byte-identical
+  results, strictly fewer applies on max_iter-limited solves).
 - **A structural GPU rewrite for small systems.** The small-system GPU gap is fp64
   precision, not launch latency or eager-mode overhead. See the GPU section.
 - **Ozaki-scheme emulated-fp64 GEMM for the CUDA Toeplitz local apply (built and
