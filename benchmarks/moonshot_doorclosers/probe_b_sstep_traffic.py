@@ -97,6 +97,43 @@ def run_gemm(npw: int, newdim: int, p: int, reps: int):
           f"model_bytes_per_flop={bytes_stream / flops:.4f} acc={acc:.3e}")
 
 
+def run_sweep(npw: int, newdim: int, reps: int):
+    """GFLOP/s vs panel width (wall-time, no perf needed): shows whether the two
+    incremental-RR ZGEMMs are bandwidth- or compute-bound at Si-64 dims. A flat
+    GFLOP/s across small->large panel means already compute-bound (s-step's
+    traffic reduction cannot convert to speed -> KILL); a low-at-small,
+    rising-at-large curve means a bandwidth-bound small-panel regime s-step could
+    help. RUN ON AN IDLE BOX. Also prints analytic AI = flops/bytes."""
+    import time
+
+    import numpy as np
+    from scipy.linalg.blas import zgemm
+
+    rng = np.random.default_rng(0)
+    V = np.asfortranarray(rng.standard_normal((npw, newdim))
+                          + 1j * rng.standard_normal((npw, newdim)))
+    print(f"SWEEP npw={npw} newdim={newdim} reps={reps} (V={npw * newdim * 16 / 1e6:.0f}MB)")
+    for p in (4, 8, 16, 32, 64, 128, 256):
+        if p > newdim:
+            break
+        HVnew = np.asfortranarray(rng.standard_normal((npw, p))
+                                  + 1j * rng.standard_normal((npw, p)))
+        Vnew = np.asfortranarray(rng.standard_normal((npw, p))
+                                 + 1j * rng.standard_normal((npw, p)))
+        zgemm(1.0, V, HVnew, trans_a=2)  # warm
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            zgemm(1.0, V, HVnew, trans_a=2)
+            zgemm(1.0, V, Vnew, trans_a=2)
+        dt = time.perf_counter() - t0
+        flops = 2 * reps * 8.0 * newdim * p * npw
+        # per-gemm bytes (V + panel read, C write); AI = flops/bytes
+        bytes_1 = 16.0 * (npw * newdim + npw * p + newdim * p)
+        ai = (8.0 * newdim * p * npw) / bytes_1
+        print(f"  p={p:4d} wall={dt:7.3f}s GFLOP/s={flops / dt / 1e9:7.1f} "
+              f"AI={ai:6.2f}flop/byte  model_B/flop={2 * bytes_1 / (2 * 8.0 * newdim * p * npw):.4f}")
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] == "dims":
         run_dims()
@@ -104,6 +141,10 @@ def main():
     if sys.argv[1] == "gemm":
         _, _, npw, newdim, p, reps = sys.argv
         run_gemm(int(npw), int(newdim), int(p), int(reps))
+        return
+    if sys.argv[1] == "sweep":
+        _, _, npw, newdim, reps = sys.argv
+        run_sweep(int(npw), int(newdim), int(reps))
         return
     raise SystemExit(f"unknown mode {sys.argv[1]!r}")
 
