@@ -249,30 +249,42 @@ def _sad_planar_density(
     return rho.mean(dim=other).detach().cpu().numpy()
 
 
-def resolve_slab_box(
-    inp: Input,
+def resolve_slab_box_geom(
+    cell: np.ndarray,
+    positions: np.ndarray,
+    *,
+    boundary: str,
+    ecut: float,
     upfs: Sequence[UPFData | PAWData],
     species_of_atom: Sequence[int],
+    vacuum_autosize: bool,
+    vacuum_target: str = "workfunction",
+    vacuum_tol: float | None = None,
+    vacuum_margin: float | None = None,
+    min_vacuum: float = 3.0,
+    npw_gate: int = 8000,
+    vacuum_fraction_gate: float = 0.3,
 ) -> SlabBox:
-    """Resolve the (possibly trimmed) slab box for ``inp``.
+    """Pure-geometry slab-box resolver — the shared core of the api driver path
+    (:func:`resolve_slab_box`, which reads these fields off an ``Input``) and the
+    ASE-facing :func:`trim_slab_vacuum`.
 
-    A no-op (returns the original cell/positions, ``trimmed=False``) unless the
-    slab auto-sizer is enabled *and* the boundary is an open (ESM) one *and* both
+    A no-op (returns the original cell/positions, ``trimmed=False``) unless
+    ``vacuum_autosize`` is set *and* ``boundary`` is an open (ESM) one *and* both
     gates pass. Never runs an SCF — the tail comes from the SAD density."""
-    cell = np.asarray(inp.atoms.cell.array, dtype=np.float64).reshape(3, 3)
-    positions = np.asarray(inp.atoms.get_positions(), dtype=np.float64).reshape(-1, 3)
-    slab = inp.slab
-    npw = _npw_estimate(cell, inp.ecut)
+    cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    npw = _npw_estimate(cell, ecut)
 
     def noop(reason: str, axis: int | None = None) -> SlabBox:
         return SlabBox(cell, positions, False, axis, float(np.linalg.norm(cell[axis]))
                        if axis is not None else 0.0, 0.0, npw, reason)
 
-    if not slab.vacuum_autosize:
+    if not vacuum_autosize:
         return noop("vacuum_autosize off")
-    if inp.scf.boundary not in ("open_z", "open_z_metal"):
+    if boundary not in ("open_z", "open_z_metal"):
         return noop(
-            f"boundary={inp.scf.boundary!r} is not an open (ESM) boundary — "
+            f"boundary={boundary!r} is not an open (ESM) boundary — "
             "auto-size only trims when the open-axis electrostatics are box-"
             "independent")
 
@@ -282,27 +294,27 @@ def resolve_slab_box(
     length = float(lengths[axis])
     vac_frac = float(gaps[axis] / length) if length > 0 else 0.0
 
-    if npw < slab.npw_gate:
+    if npw < npw_gate:
         return noop(
-            f"npw≈{npw} < gate {slab.npw_gate} — latency-bound, trimming pointless",
+            f"npw≈{npw} < gate {npw_gate} — latency-bound, trimming pointless",
             axis)
-    if vac_frac < slab.vacuum_fraction_gate:
+    if vac_frac < vacuum_fraction_gate:
         return noop(
-            f"vacuum fraction {vac_frac:.2f} < gate {slab.vacuum_fraction_gate} — "
+            f"vacuum fraction {vac_frac:.2f} < gate {vacuum_fraction_gate} — "
             "not vacuum-dominated (bulk-ish); leaving box",
             axis)
 
-    rho_tol, margin = _TARGET_DEFAULTS[slab.vacuum_target]
-    if slab.vacuum_tol is not None:
-        rho_tol = slab.vacuum_tol
-    if slab.vacuum_margin is not None:
-        margin = slab.vacuum_margin
+    rho_tol, margin = _TARGET_DEFAULTS[vacuum_target]
+    if vacuum_tol is not None:
+        rho_tol = vacuum_tol
+    if vacuum_margin is not None:
+        margin = vacuum_margin
 
     rho_planar = _sad_planar_density(
-        cell, positions, species_of_atom, upfs, inp.ecut, axis)
+        cell, positions, species_of_atom, upfs, ecut, axis)
     new_cell, new_pos, info = size_box_from_planar_density(
         cell, positions, rho_planar, axis,
-        rho_tol=rho_tol, margin=margin, min_vacuum=slab.min_vacuum)
+        rho_tol=rho_tol, margin=margin, min_vacuum=min_vacuum)
 
     length_after = float(info.get("length_after", length))  # ty: ignore[invalid-argument-type]
     reason = str(info["reason"])
@@ -310,15 +322,42 @@ def resolve_slab_box(
     if trimmed and info.get("hit_floor"):
         warnings.warn(
             "slab vacuum auto-size: the density tail wanted less vacuum than the "
-            f"{slab.min_vacuum:.1f} Å/face safety floor; box floored at the safety "
-            "minimum. Lower slab.min_vacuum only if you know the tail is captured.",
+            f"{min_vacuum:.1f} Å/face safety floor; box floored at the safety "
+            "minimum. Lower min_vacuum only if you know the tail is captured.",
             stacklevel=2)
     if trimmed:
         logger.info(
             "slab vacuum auto-size (%s): open axis %d, %.2f → %.2f Å, "
             "npw≈%d (was for the original box); %s",
-            slab.vacuum_target, axis, length, length_after, npw, reason)
+            vacuum_target, axis, length, length_after, npw, reason)
     return SlabBox(
         new_cell if trimmed else cell,
         new_pos if trimmed else positions,
         trimmed, axis, length, length_after, npw, reason)
+
+
+def resolve_slab_box(
+    inp: Input,
+    upfs: Sequence[UPFData | PAWData],
+    species_of_atom: Sequence[int],
+) -> SlabBox:
+    """Resolve the (possibly trimmed) slab box for ``inp`` (api driver path).
+
+    Thin wrapper over :func:`resolve_slab_box_geom` reading the box, boundary and
+    ``slab.*`` knobs off the ``Input``."""
+    slab = inp.slab
+    return resolve_slab_box_geom(
+        np.asarray(inp.atoms.cell.array, dtype=np.float64).reshape(3, 3),
+        np.asarray(inp.atoms.get_positions(), dtype=np.float64).reshape(-1, 3),
+        boundary=inp.scf.boundary,
+        ecut=inp.ecut,
+        upfs=upfs,
+        species_of_atom=species_of_atom,
+        vacuum_autosize=slab.vacuum_autosize,
+        vacuum_target=slab.vacuum_target,
+        vacuum_tol=slab.vacuum_tol,
+        vacuum_margin=slab.vacuum_margin,
+        min_vacuum=slab.min_vacuum,
+        npw_gate=slab.npw_gate,
+        vacuum_fraction_gate=slab.vacuum_fraction_gate,
+    )
