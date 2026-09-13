@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def effective_smearing_type(smearing_type: str) -> str:
+    """A spinor / numbers-in path needs a real smearing kernel, so coerce the
+    ``"none"`` fixed-occupation setting to ``"gaussian"``. Shared by the
+    noncollinear dispatch (`dispatch.run_magnetism`), the NC SCF driver
+    (`scf._run_scf_noncollinear`), and the NC error-estimate summary block."""
+    return smearing_type if smearing_type != "none" else "gaussian"
+
+
 XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE,
                                               "r2scan": R2SCAN,
                                               # closed-shell (nspin=1) has ζ≡0,

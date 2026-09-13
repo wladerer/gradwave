@@ -10,6 +10,7 @@ from gradwave.api._common import (
     SPIN_XC_REGISTRY,
     XC_REGISTRY,
     _mixing_scheme,
+    effective_smearing_type,
 )
 from gradwave.api.system import (
     _hubbard_manifolds,
@@ -281,7 +282,7 @@ def _run_scf_noncollinear(
         mag_vec_init = torch.stack([s * z for s in scales])  # (na, 3)
 
     # NC SCF requires a real smearing scheme (spinor bands hold one electron)
-    smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
+    smtype = effective_smearing_type(inp.smearing.type)
     # DFT+U: noncollinear/spin-orbit +U (the 2×2 spin-block occupation matrix,
     # core.hubbard) — same manifold list the collinear/USPP paths take.
     manifolds = _hubbard_manifolds(inp)

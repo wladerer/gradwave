@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from gradwave.api._common import SPIN_XC_REGISTRY
+from gradwave.api._common import SPIN_XC_REGISTRY, effective_smearing_type
 from gradwave.api.dispersion import _apply_dispersion
 from gradwave.api.elastic import run_elastic
 from gradwave.api.eos import run_eos
@@ -48,17 +48,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _effective_smearing_type(smearing_type: str) -> str:
-    """A spinor / numbers-in path needs a real smearing kernel, so coerce the
-    ``"none"`` fixed-occupation setting to ``"gaussian"``.
-
-    NOTE (for the integrating parent): the identical coercion is copied in
-    ``api/scf.py`` (~line 284) and ``api/summary.py`` (~line 465). The single
-    shared home for it is ``api/_common.py`` (imported by all three); it lives
-    here for now because this refactor is scoped away from scf.py/summary.py."""
-    return smearing_type if smearing_type != "none" else "gaussian"
-
-
 def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
     """Characterize the magnetism of the input system (task: magnetism). Builds a
     non-collinear XC from inp.xc, runs `characterize_magnetism`, and returns the
@@ -71,7 +60,7 @@ def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
         system = system.to(inp.device)
     xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
     m = inp.magnetism
-    smtype = _effective_smearing_type(inp.smearing.type)
+    smtype = effective_smearing_type(inp.smearing.type)
     return characterize_magnetism(
         system, xc, exchange=m.exchange, ref_atom=m.ref_atom, lam=m.lam,
         delta=m.delta, seed_scale=m.seed_scale, smearing=smtype,
