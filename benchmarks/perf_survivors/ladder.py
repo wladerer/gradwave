@@ -29,6 +29,7 @@ import torch
 from gradwave.constants import RY_EV as RY
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.recorder import SCFRecorder
@@ -73,7 +74,7 @@ CASES = {
     "fe1": dict(
         geom=((2.87 / 2) * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]]),
               np.zeros((1, 3)), ["Fe"]),
-        ecut=40 * RY, kmesh=(4, 4, 4), xc=PBE, nbands=None,
+        ecut=40 * RY, kmesh=(4, 4, 4), xc=SpinPBE, nbands=None,
         scf=dict(smearing="gaussian", width=0.1, etol=1e-8, rhotol=1e-7,
                  nspin=2, start_mag=[0.7], max_iter=80)),
     "si64": dict(
