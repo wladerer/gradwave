@@ -501,11 +501,20 @@ time again.
   both the CPU and the RTX 3050. The mixed-precision wins are on the fixed-occupation
   insulators and on the moderate-grid USPP/PAW many-k and spin-orbit cases. See "Mixed
   precision" above.
-- **Γ-point real wavefunctions.** Half-basis real algebra at Γ can at best halve the
-  Hamiltonian-apply share, which caps the end-to-end gain at roughly 1.3 to 1.5
-  times, for the most invasive change in the stack. Mixed precision already gives
-  1.2 times on the same system at a fraction of the risk. This is deferred, not
-  rejected, and worth revisiting only if Γ-only molecular workloads dominate.
+- **Γ-point real wavefunctions.** SHIPPED and **on by default** (`auto`) since
+  [D-020] (`GRADWAVE_GAMMA_REAL`; set `0` to force the complex path). At Γ a
+  nonmagnetic (or per-spin collinear-magnetic) Hamiltonian is real, so the whole
+  solve runs in real arithmetic on the half sphere — half the field bytes, real
+  BLAS. Measured exact (rel ΔE ≤ 1e-15) and, on large Γ-only supercells,
+  net **1.4× (Al-32 metal) to 2.4× (Si-64 insulator, 30 Ry)** end-to-end on asus
+  at 8 threads (per-iteration speedup plus a modest iteration-count reduction).
+  The earlier estimate that half-basis algebra caps the gain at 1.3–1.5× was
+  conservative: it counted only the H-apply share and missed the field-memory
+  halving and the fewer FFTs. The gain shrinks below 1× on tiny cells (small
+  npw, fixed overhead dominates) but Γ-only work in practice means large cells
+  (molecule/defect in a big box, supercell, amorphous). Magnetic spinor/SOC runs
+  are unaffected — they use the `scf_noncollinear` driver, which never reaches
+  this path (Kramers K²=−1 forbids the realification there).
 - **Widening `_QR_CPU_MAX_COLS` past 16 for large-`nb` systems.** Measured directly
   (not assumed) at a large-`nb` magnetic mineral's actual shape (`nk=13`,
   `npw=6746`, `cols` up to 64, "Case study, a large-nb magnetic mineral on GPU"

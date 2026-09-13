@@ -127,22 +127,24 @@ _CHEFSI_MIN_NB = 640
 # wavefunction bytes) with a real half-box FFT local term — the memory lever for
 # large Γ-only slabs.
 #
-# OPT-IN (default OFF). GRADWAVE_GAMMA_REAL in {auto,1,0}: UNSET (the default)
-# ⇒ "0" ⇒ the complex path, byte-for-byte unchanged; "auto" engages the real
-# path whenever provably safe and silently falls back otherwise; "1" forces it
-# on and raises if a correctness blocker is present or the sphere is not Γ; "0"
-# disables it. Opting in with "auto"/"1" is exact either way.
-# [D-009] why it defaults OFF, not "auto" (SCF iteration count near the
-# convergence boundary is not bit-reproducible between the two eigensolvers) —
+# DEFAULT "auto". GRADWAVE_GAMMA_REAL in {auto,1,0}: UNSET (the default)
+# ⇒ "auto" ⇒ the real path engages whenever provably safe (nonmagnetic OR
+# collinear-magnetic Γ-only, NC path, none of the unsupported operators) and
+# silently falls back otherwise; "1" forces it on and raises if a correctness
+# blocker is present or the sphere is not Γ; "0" disables it (the complex path,
+# byte-for-byte unchanged). Every route is exact — the real and complex fixed
+# points agree to machine precision.
+# [D-020] supersedes [D-009]: measured exact + up to ~2x faster across the
+# nonmagnetic + collinear-magnetic matrix, so the default flips OFF → "auto".
 # docs/design/decision-records.md. See `_resolve_gamma_real`.
 
 
 def _gamma_real_mode() -> str:
-    """``GRADWAVE_GAMMA_REAL`` in {"0" (default), "auto", "1"}. Read per call,
+    """``GRADWAVE_GAMMA_REAL`` in {"auto" (default), "1", "0"}. Read per call,
     not at import — an import-frozen copy silently ignores ``os.environ`` set
     after ``import gradwave`` (the same measured-benchmark footgun class
     ``_resolve_eigensolver`` documents)."""
-    return os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
+    return os.environ.get("GRADWAVE_GAMMA_REAL", "auto").strip().lower()
 
 
 def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
@@ -893,10 +895,10 @@ def _resolve_gamma_real(
 
     Returns a frozen ``GammaBasis`` when a single-k Γ calculation is PROVABLY
     safe for the real path, else ``None`` (the complex path runs unchanged).
-    ``GRADWAVE_GAMMA_REAL`` in {auto,1,0}: "0" (unset — the default) disables it,
-    running the complex path byte-for-byte; "1" forces it on and RAISES on any
-    correctness blocker or a non-Γ sphere (never silently runs an inexact path);
-    "auto" engages it silently when eligible and silently falls back otherwise.
+    ``GRADWAVE_GAMMA_REAL`` in {auto,1,0}: "auto" (unset — the default) engages
+    it silently when eligible and silently falls back otherwise; "1" forces it on
+    and RAISES on any correctness blocker or a non-Γ sphere (never silently runs
+    an inexact path); "0" disables it, running the complex path byte-for-byte.
 
     Eligibility is deliberately conservative — every condition below must hold:
 

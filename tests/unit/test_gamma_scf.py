@@ -21,6 +21,7 @@ import torch
 
 import gradwave.scf.loop as loop
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY
@@ -71,6 +72,42 @@ def test_scf_energy_matches_complex(o2_system, monkeypatch):
     assert float((res_g.rho - res_c.rho).abs().max()) < 1e-8
 
 
+@pytest.fixture(scope="module")
+def ni_fm_system():
+    """FM fcc Ni at Γ, run as collinear nspin=2. Time-reversal maps ↑→↓, but
+    WITHIN each spin channel V_σ(r) is real (the antiunitary is plain conjugation
+    K, K²=+1), so each channel is solved on its own real half sphere. This pins
+    that per-spin realification. (The Kramers K²=−1 obstruction is spinor-only
+    — noncollinear/SOC — and never reaches this gate; see _resolve_gamma_real.)"""
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "pseudos" / "PD_Ni_PBE.upf")
+    a = 3.52
+    cell = 0.5 * a * np.array([[0, 1, 1.0], [1, 0, 1], [1, 1, 0]])
+    return setup_system(cell, np.zeros((1, 3)), [0], [upf], ecut=45 * RY,
+                        kmesh=(1, 1, 1), nbands=14, time_reversal=False)
+
+
+def test_magnetic_nspin2_matches_complex(ni_fm_system, monkeypatch):
+    """Collinear nspin=2 is SAFE: the real path solves each spin channel on its
+    own real half sphere and reproduces the complex path to machine precision
+    ([D-020]). Measured on FM Ni: rel ΔE = 0, moments identical."""
+    kw = dict(nspin=2, start_mag=[0.5], smearing="gaussian", width=0.1,
+              kerker=True, etol=1e-9, rhotol=1e-8, verbose=False, max_iter=200)
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "0")
+    res_c = scf(ni_fm_system, LSDA_PW92(), **kw)
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "1")
+    res_g = scf(ni_fm_system, LSDA_PW92(), **kw)
+
+    assert res_c.converged and res_g.converged
+    assert res_c.gamma_real is False
+    assert res_g.gamma_real is True  # nspin=2 genuinely engages the real path
+    e_c, e_g = float(res_c.energies.total), float(res_g.energies.total)
+    assert abs(e_g - e_c) / abs(e_c) < 1e-9, (e_g, e_c)
+    assert abs(float(res_g.mag_total) - float(res_c.mag_total)) < 1e-6
+    assert float((res_g.eigenvalues - res_c.eigenvalues).abs().max()) < 1e-6
+    assert float((res_g.rho - res_c.rho).abs().max()) < 1e-8
+
+
 def test_auto_engages_on_gamma(o2_system, monkeypatch):
     """`auto` (the default) picks the real path for an eligible Γ calculation."""
     res = _run(o2_system, monkeypatch, "auto")
@@ -85,18 +122,15 @@ def test_disabled_env_uses_complex(o2_system, monkeypatch):
     assert gb is None
 
 
-def test_default_is_opt_in_off():
-    """The path is OPT-IN: an UNSET GRADWAVE_GAMMA_REAL resolves to "0" (the
-    complex path), so existing Γ-only runs are unchanged. This guards the
-    default against silently flipping back to auto-on."""
-    import os
-
-    saved = os.environ.pop("GRADWAVE_GAMMA_REAL", None)
-    try:
-        assert os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower() == "0"
-    finally:
-        if saved is not None:
-            os.environ["GRADWAVE_GAMMA_REAL"] = saved
+def test_default_is_auto(o2_system, monkeypatch):
+    """The path is ON BY DEFAULT: an UNSET GRADWAVE_GAMMA_REAL resolves to
+    "auto" ([D-020], superseding [D-009]), so an eligible Γ-only run takes the
+    real path. This guards the default against silently regressing to off."""
+    monkeypatch.delenv("GRADWAVE_GAMMA_REAL", raising=False)
+    assert loop._gamma_real_mode() == "auto"
+    # and it actually engages on an eligible Γ system with the env var unset
+    gb = loop._resolve_gamma_real(o2_system, PBE(), None, None, False, None)
+    assert gb is not None
 
 
 def test_gate_falls_back_for_multi_k(monkeypatch):
