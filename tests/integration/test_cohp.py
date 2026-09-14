@@ -511,3 +511,80 @@ def test_cohp_contracted_basis_moves_toward_lobster_direction(diamond_c):
     # the actual point: strictly SMALLER magnitude than pswfc, moving toward
     # LOBSTER -- the direction IAO gets wrong.
     assert abs(con.pair_icohp["1-2"]) < abs(base.pair_icohp["1-2"])
+
+
+@pytest.fixture(scope="module")
+def diamond_c_paw():
+    """Converged diamond-carbon PBE PAW SCF (C.pbe-n-kjpaw_psl, which carries both
+    PP_PSWFC chi and PP_FULL_WFC AE/PS partial waves), for the PAW AE-reconstruction
+    COHP tests. a set so the C-C bond is LOBSTER's 1.547 A; full (unreduced) 2x2x2
+    mesh so resolve_images can pick out the single nearest-neighbour bond."""
+    torch.set_num_threads(8)
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+    paw = parse_upf_paw(f"{FIX}/C.pbe-n-kjpaw_psl.1.0.0.UPF")
+    a = 4 * 1.547 / np.sqrt(3)
+    cell, pos = si_fcc(a=a)
+    system = setup_uspp(cell, pos, [0, 0], [paw], ecut=60 * RY, kmesh=(2, 2, 2),
+                        use_symmetry=False, nbands=24)
+    res = scf_uspp(system, PBE(), nspin=1, smearing="gaussian", width=0.05,
+                   etol=1e-8, rhotol=1e-7, verbose=False)
+    assert res.converged
+    return res, system
+
+
+@pytest.mark.slow
+def test_cohp_paw_ae_reconstruction_brackets_lobster(diamond_c_paw):
+    """PAW all-electron reconstruction of the COHP projection on diamond, against
+    the per-bond LOBSTER oracle -9.586 eV (per-spin ISPIN=1 convention). MEASURED
+    (asus, ecut 60 Ry, 2x2x2 unreduced): the smooth pseudo projection, the AE
+    reconstruction (candidate A, `paw_reconstruct=True`) and the S-metric
+    augmentation (candidate B, `paw_reconstruct='smetric'`) come out at -9.43,
+    -8.69 and -10.96 eV respectively -- the two candidates BRACKET the oracle, A
+    below and B above, and neither cleanly lands on it (see cohp() docstring).
+
+    This pins that measured picture rather than a hoped-for closure: it asserts
+    the bracket (A magnitude < smooth < B magnitude, and signed A > oracle > B)
+    and that the augmentation actually fires and stays bonding. It does NOT claim
+    the residual is closed -- it is bracketed, and LOBSTER's own number is a
+    basis-dependent approximation, not the exact AE value candidate A targets."""
+    res, _ = diamond_c_paw
+    ORACLE = -9.586  # LOBSTER per-bond C-C ICOHP, per-spin
+
+    def bond(**kw):
+        c = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                      summed_spins=False, **kw)
+        return c.pair_icohp["1-2"]
+
+    smooth = bond(paw_reconstruct=False)
+    ae = bond(paw_reconstruct=True)       # candidate A (default)
+    smetric = bond(paw_reconstruct="smetric")  # candidate B
+
+    # all three are bonding
+    assert smooth < 0 and ae < 0 and smetric < 0
+    # the augmentation actually changes the number (not a silent no-op)
+    assert abs(ae - smooth) > 0.1
+    assert abs(smetric - smooth) > 0.1
+    # candidate A reduces the magnitude; candidate B increases it (measured bracket)
+    assert abs(ae) < abs(smooth) < abs(smetric)
+    # and the two candidates bracket the LOBSTER oracle (A below, B above)
+    assert ae > ORACLE > smetric
+    # each candidate lands within a sane factor of the oracle (regression band)
+    assert 0.8 < ae / ORACLE < 1.0
+    assert 1.05 < smetric / ORACLE < 1.25
+
+
+@pytest.mark.slow
+def test_cohp_paw_reconstruct_summed_spins_half(diamond_c_paw):
+    """The summed_spins per-spin convention composes with the PAW reconstruction:
+    on the PAW USPPResult too, summed_spins=False is exactly half the physical
+    two-electron value, for both the smooth and the AE-reconstructed projection."""
+    res, _ = diamond_c_paw
+    for recon in (False, True):
+        full = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                         summed_spins=True, paw_reconstruct=recon)
+        half = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                         summed_spins=False, paw_reconstruct=recon)
+        assert half.pair_icohp["1-2"] == pytest.approx(
+            0.5 * full.pair_icohp["1-2"], rel=1e-9)
