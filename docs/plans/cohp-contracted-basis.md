@@ -101,6 +101,9 @@ have the oracle would be building the expensive half first.
 ## Validation
 
 No external COHP oracle exists in-tree yet (only the internal sum rule + sign).
+**[SUPERSEDED — see the 2026-09-13 follow-up below: a free CC-BY LOBSTER oracle
+now exists (Zenodo 10.5281/zenodo.8091844), and the ~2× is mostly a spin
+convention, not basis diffuseness.]**
 Per-image `Σ_R` reconstruction and IAO zero-spilling are internal checks that can
 land now. A LOBSTER cross-check (diamond −9.64 eV/bond) needs step 4's fixture.
 Heavy runs go to `asus` (idle); local is reserved for the small O2/Bi2 gates.
@@ -152,6 +155,10 @@ tables), which is new machinery — per-element basis data plus a fitting
 pipeline, evaluated against a real external oracle — not a parameter tweak on
 the existing PP_PSWFC radial or a different orthogonalization of it. Scoped,
 not started.
+**[UPDATE 2026-09-13: the contracted-STO machinery WAS in fact built
+(`pseudo/sto_basis.py`, `cohp(basis="contracted")`) and is now calibrated —
+measured-negative for parity — and the ~2× turns out to be mostly a spin
+reporting convention, not diffuseness. See the 2026-09-13 follow-up below.]**
 
 Also worth correcting: the original "operator overshoots ~2×, eigenvalue
 undershoots ~2×, true value bracketed between" framing does not survive
@@ -162,6 +169,94 @@ eigenvalue route (−20.4 eV/bond) sits only ~2% below the operator route
 it. What looked like a bracket was the eigenvalue route's partial convergence
 toward the operator value at lower nbands, not two independent estimates of
 the true bond strength.
+
+## Follow-up 2026-09-13: oracle obtained, cross-material calibration, convention reconciliation
+
+Three things resolved this session (all measured on asus): (1) a free external
+LOBSTER oracle now exists, (2) the contracted-STO path was finally calibrated and
+is measured-**negative** for parity, and (3) the ~2× "overshoot" this plan (and
+`cohp.py`'s QUANTITATIVE STATUS) attributed to basis diffuseness is **mostly a
+spin-degeneracy reporting-convention difference**, not basis physics.
+
+### Oracle — supersedes "no external COHP oracle exists in-tree"
+The George-group bonding database (Naik, Ertural, Dhamrait, Benner, George,
+*Sci. Data* **10**, 610 (2023)) is freely downloadable, CC-BY, **no LOBSTER binary
+and no Materials Project API key**: Zenodo DOI 10.5281/zenodo.8091844
+(`Lightweight_lobster_jsons.tar.gz`, 737 MB, one `mp-<id>.json.gz` per material,
+1520 compounds). The references are VASP-PBE-**PAW**-derived. Five per-bond ICOHP
+(eV, as-reported, integrated to E_F): C −9.586, Si −4.495, GaAs −4.350,
+MgO −0.920, NaCl −0.566.
+
+### Contracted-STO path is measured-negative — updates the step-4 decision and "Scoped, not started"
+`pseudo/sto_basis.py` (`ContractedSTO`, `fit_contracted_sto` with a `tail_reg`
+localization penalty) and `cohp(basis="contracted")` are in fact **built** — the
+"not started" note above was stale. Calibrated on the `diamond_c` fixture
+(operator route, `resolve_images`, per-bond):
+
+- `pswfc` −21.26, `iao` −21.58, `contracted` (`tail_reg` 1e-3…0.3) −20.3…−21.4 —
+  all cluster at **2.1–2.2× LOBSTER**, charge_spilling ~0.004–0.006.
+- Only `tail_reg=3` reaches −11.6 (1.2×), but at **27 % charge_spilling** — the
+  basis has stopped representing the occupied manifold.
+- A pure free-atom single-ζ Slater sweep is numerically **unstable / non-monotonic**
+  (−13.8 → −9.1 → −25.0 over small ζ steps); at carbon's actual free-atom exponent
+  it gives −25.0 (2.6×, *worse*). "Fit a more contracted orbital" is refuted: no
+  low-spilling, principled projector in this family reaches the target.
+
+Conclusion: shipping per-element contracted-STO tables on the **norm-conserving**
+projection path does not close the gap. Do not build that pipeline.
+
+### Cross-material calibration (operator route, per-bond) — the actual resolution
+
+| material | bonding | gradwave | LOBSTER | ratio | ÷2 |
+|---|---|---|---|---|---|
+| C diamond | covalent | −21.26 | −9.586 | 2.22 | 1.11 |
+| Si | covalent | −11.02 | −4.495 | 2.45 | 1.23 |
+| GaAs | covalent/polar | −9.43 | −4.350 | 2.17 | 1.08 |
+| MgO | ionic | −1.835 | −0.920 | 2.00 | 1.00 |
+| NaCl | ionic | −1.003 | −0.566 | 1.77 | 0.89 |
+
+Ratios cluster tightly (1.77–2.45, mean 2.12); sign and the full ordering
+(C > Si > GaAs > MgO > NaCl) match LOBSTER exactly. A near-constant ~2× across
+covalent/ionic and 2s2p/3s3p/4s4p+d character is a **convention** signature, not a
+basis-overlap effect (which would scatter with orbital character).
+
+**Reconciliation.** gradwave weights each off-site bond by `factor 2` (block +
+Hermitian conjugate, in `_pair_block_weights`) × `g_spin=2` (spin degeneracy), and
+its total is pinned to the physical band-structure energy by its own sum rule
+(Σ_pairs ICOHP = Σ_n f_n ε_n, f_n=2) — so gradwave is on the physical **2-electron**
+scale. The Hermitian `2` is *required by the sum rule* and both codes must include
+it. LOBSTER's `ICOHPLIST` for a non-spin-polarized (ISPIN=1) run stores the value
+under `Spin.up` only, and pymatgen/lobsterpy do not double it — so the reported /
+database value is the **per-spin (1-electron)** number. Net: gradwave (2-electron)
+vs LOBSTER (per-spin) → ~2× by convention; dividing gradwave by 2 collapses the
+ratio to mean **1.06** (C 1.11, Si 1.23, GaAs 1.08, MgO 1.00, NaCl 0.89). (The
+spin-convention direction is inferred from pymatgen's Spin.up-only, non-doubling
+storage plus the empirical ÷2 collapse; not a direct LOBSTER-manual quote — worth a
+one-line confirmation against a raw `ICOHPLIST.lobster` if one becomes available.)
+
+So the dominant offset is the **spin reporting convention**, and the ~±10–20 %
+residual after ÷2 is the real, *secondary* NC-pseudo-vs-PAW effect: gradwave
+slightly overestimates covalent bonds (1.08–1.23 — a more diffuse projector gives
+larger bond-region off-site H̃) and matches/underestimates the ionic pair (0.89–1.00,
+little shared bond density → basis matters least).
+
+### Revised path to quantitative ICOHP
+1. **Convention fix (cheap, principled).** To compare against LOBSTER ISPIN=1
+   values, multiply LOBSTER by 2 (or add a per-spin option to `cohp`). gradwave's
+   2-electron convention is the sum-rule-correct one — this is a
+   comparison/documentation fix, not a physics change. Brings all five to ~±10–20 %.
+2. **Residual NC-vs-PAW (~10–20 %, covalent-biased).** Close to a few % only via
+   all-electron / PAW-reconstructed wavefunctions (gradwave's PAW path, or FLAPW as
+   the COHP source), or document as a known systematic. The contracted-STO basis
+   swap does **not** address this.
+3. **Supersede the "basis diffuseness is the dominant cause" framing** in this
+   plan's Motivation and in `src/gradwave/postscf/cohp.py`'s QUANTITATIVE STATUS:
+   diffuseness is real but secondary; the dominant 2× was spin convention. The
+   cohp.py docstring should be updated to match (tracked separately).
+
+Validation harness now exists: 5 oracle points (1520 available via the Zenodo
+pull), the `diamond_c` fixture in `tests/integration/test_cohp.py`, and the
+operator-route calibration pattern.
 
 ## References
 
