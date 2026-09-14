@@ -303,16 +303,24 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
                        torch.zeros_like(gpar))
     dv_hat = pref.unsqueeze(-1) * (conv_open - conv_per)
 
-    # G∥=0 channel: open 1D Coulomb (−2π e² ∫|z−z'| s) minus the SPECTRAL periodic
-    # 1D Hartree of s (z-FFT, ×4π e²/Gz², 0 at Gz=0). The periodic reference must
-    # be EXACTLY the one hartree_potential_r adds back in the SCF: its G∥=0 column
-    # is the 1D spectral Hartree of this same in-plane-summed column s (a pure-z
-    # mode has G²=Gz², and hartree_potential_r's inv_g2 symmetrization is a no-op
-    # there). The old real-space wrapped kernel (−½|u_wrap|+u_wrap²/2L) is the
-    # *sampled continuum* periodic Green's function, whose DFT aliases away from
-    # 4π e²/Gz² for the non-decaying |u|/u² kernel — leaving a residual vacuum
-    # field that grows linearly with vacuum thickness. Because ρ_tot uses smooth
-    # Gaussian ions, differencing against the spectral reference stays grid-safe.
+    # G∥=0 channel. The SCF adds back the SPECTRAL periodic Hartree
+    # (hartree_potential_r, 4π e²/Gz²), so the open-minus-periodic delta's periodic
+    # reference must be that same spectral operator — its G∥=0 column is the 1D
+    # spectral Hartree of this in-plane-summed column s (a pure-z mode has G²=Gz²;
+    # hartree_potential_r's inv_g2 symmetrization is a no-op there). The old
+    # real-space wrapped kernel (−½|u_wrap|+u_wrap²/2L) is the *sampled continuum*
+    # periodic Green's function, whose DFT aliases away from 4π e²/Gz² for the
+    # non-decaying |u|/u² kernel — a residual vacuum field growing with Lz.
+    #
+    # For a NEUTRAL G∥=0 channel (Σ s = 0, the vacuum-mode invariant) the exact
+    # correction c = v_open − v_per is *linear* in z: both solve v'' = −4π e² s
+    # (the periodic G=0-drop adds only a background, zero for neutral s), so c''=0.
+    # The only non-linear content in the discrete difference is the grid-scale
+    # mismatch between the real-space |u| open kernel and the spectral periodic
+    # operator — a self-energy residue that would make ΔE depend on the ion
+    # Gaussian width β. We therefore project c onto its exact analytic form {1, z}
+    # (a differentiable least-squares fit): translation-covariant, grid-residue-
+    # free, and β-independent (the slope is fixed by the β-independent dipole).
     s = rho_hat[0, 0, :]
     zc = torch.arange(nz, device=dev, dtype=rdt) * dz
     u = zc[:, None] - zc[None, :]
@@ -320,11 +328,17 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
     n_freq = torch.as_tensor(np.fft.fftfreq(nz, d=1.0 / nz).astype(np.float64),
                              device=dev).to(rdt)
     gz = 2.0 * math.pi * n_freq / lz
-    inv_gz2 = torch.where(gz * gz > _GPAR2_ZERO_TOL, 1.0 / (gz * gz),
-                          torch.zeros_like(gz))
+    gz2 = gz * gz
+    inv_gz2 = torch.where(gz2 > _GPAR2_ZERO_TOL,
+                          1.0 / torch.clamp(gz2, min=_GPAR2_ZERO_TOL),
+                          torch.zeros_like(gz2))  # clamp inside ÷ → no inf-grad
     mult = (4.0 * math.pi * E2 * inv_gz2).to(rho_hat.dtype)
     v_per = torch.fft.ifft(mult * torch.fft.fft(s))
-    dv00 = v_open - v_per
+    c_raw = v_open - v_per
+    # least-squares projection of c_raw onto {1, z} (keep only the exact linear c)
+    zz = zc - zc.mean()
+    slope = (zz.to(rho_hat.dtype) * c_raw).sum() / (zz * zz).sum()
+    dv00 = c_raw.mean() + slope * zz.to(rho_hat.dtype)
     mask = torch.zeros((n_a, n_b), device=dev, dtype=dv_hat.dtype)
     mask[0, 0] = 1.0
     dv_hat = dv_hat * (1.0 - mask).unsqueeze(-1) + mask.unsqueeze(-1) * dv00

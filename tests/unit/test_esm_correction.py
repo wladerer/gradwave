@@ -271,12 +271,15 @@ def test_capacitor_charged_reference_calibrated_to_plates():
 
 
 def _g0_vacuum_field(az, n_open):
-    """In-plane-averaged esm_delta_potential field [meV/Å] in deep vacuum for a
-    centered, in-plane-uniform (pure G∥=0), neutral, non-polar z-density. The
-    G∥=0 open-minus-periodic reference must equal the spectral periodic Hartree
-    that the SCF adds back, so a centered neutral slab feels NO uniform vacuum
-    field. Returns (slope_lo, slope_hi) [meV/Å] near the two box edges."""
+    """In-plane-averaged effective ESM field [meV/Å] in deep vacuum for a centered,
+    in-plane-uniform (pure G∥=0), neutral, non-polar z-density. The quantity that
+    must be flat in vacuum is the FULL G∥=0 potential the SCF sees: the spectral
+    periodic Hartree (added back in the loop) plus the open-minus-periodic delta,
+    which equals the true open potential v_open — flat in the vacuum of a neutral
+    non-polar slab. A mismatched delta reference leaves a same-sign residual field
+    that grows with Lz (the bug). Returns (slope_lo, slope_hi) [meV/Å]."""
     from gradwave.core.energies.esm import esm_delta_potential
+    from gradwave.core.energies.hartree import hartree_potential_r
 
     grid = build_fft_grid(np.diag([6.0, 6.0, az]), ecut=1.0,
                           shape_override=(20, 20, n_open))
@@ -291,11 +294,12 @@ def _g0_vacuum_field(az, n_open):
     prof = prof - prof.mean()  # exact neutrality on the grid
     rho = torch.zeros((20, 20, n_open), dtype=torch.float64)
     rho[:, :] = torch.as_tensor(prof, dtype=torch.float64)
-    dv = esm_delta_potential(rho, grid.cell, 2).mean(dim=(0, 1)).cpu().numpy()
+    v_open = (hartree_potential_r(rho, grid.g2)
+              + esm_delta_potential(rho, grid.cell, 2)).mean(dim=(0, 1)).cpu().numpy()
 
     def slope(mask):
         A = np.vstack([zc[mask], np.ones(mask.sum())]).T
-        return np.linalg.lstsq(A, dv[mask], rcond=None)[0][0] * 1000.0
+        return np.linalg.lstsq(A, v_open[mask], rcond=None)[0][0] * 1000.0
 
     lo = (zc >= 1.0) & (zc <= c - 4.0)
     hi = (zc >= c + 4.0) & (zc <= az - 1.0)
@@ -303,14 +307,15 @@ def _g0_vacuum_field(az, n_open):
 
 
 def test_g0_reference_no_residual_vacuum_field():
-    """Regression: the G∥=0 open-minus-periodic reference is the SPECTRAL periodic
-    Hartree, so a centered neutral non-polar slab feels no residual uniform vacuum
-    field, and that field does not drift with vacuum thickness. The old real-space
-    wrapped-kernel reference left a ~O(100 meV/Å) same-sign field growing with Lz."""
+    """Regression: v_periodic_spectral + esm_delta = v_open, so a centered neutral
+    non-polar slab feels no residual uniform vacuum field, stable across two Lz.
+    The old real-space wrapped-kernel G∥=0 reference (which did NOT match the
+    spectral periodic Hartree the SCF adds back) left a same-sign field that grew
+    with vacuum thickness."""
     lo1, hi1 = _g0_vacuum_field(24.0, 160)
     lo2, hi2 = _g0_vacuum_field(30.0, 200)  # same dz=0.15
     for s in (lo1, hi1, lo2, hi2):
-        assert abs(s) < 5.0, ("residual G∥=0 vacuum field", lo1, hi1, lo2, hi2)
+        assert abs(s) < 3.0, ("residual G∥=0 vacuum field", lo1, hi1, lo2, hi2)
     assert abs(lo2 - lo1) < 2.0 and abs(hi2 - hi1) < 2.0, (lo1, hi1, lo2, hi2)
 
 
