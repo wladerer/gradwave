@@ -122,3 +122,18 @@ def test_corundum_al_efg_vs_elk():
     assert np.sign(v_zz) == np.sign(elk), f"Al V_zz sign {v_zz:+.2f} vs Elk {elk:+.2f}"
     assert abs(v_zz - elk) < 0.35 * abs(elk), f"Al V_zz {v_zz:+.3f} vs Elk {elk:+.3f} eV/Å²"
     assert float(al["eta"]) < 0.15, f"Al site is axial; eta={al['eta']:.3f}"
+
+    # Free within-repo equivalence check (no external number): the four Al are one
+    # crystallographic orbit (R-3c, all on the 3-fold axis) and MUST carry the same
+    # (V_zz, η). This is the convention-free identity the PW/PAW route gates at
+    # standard tier (tests/unit/test_efg_paw.py::test_efg_paw_equivalent_sites_agree);
+    # asserting it here too catches a per-site FLAPW assembly split for free, since
+    # this fixture already runs. The 1 % window covers the fullpot loop's basin/grid
+    # residual while staying far tighter than a real per-site split (the σ_dq class of
+    # bug, ≳1.5 %) — the Al orbit sits on the 3-fold axis, so its residual is small.
+    al_sites = [ie["efg"][f"a{i}"] for i in range(4)]
+    al_vzz = np.array([float(s["V_zz"]) for s in al_sites])
+    al_eta = np.array([float(s["eta"]) for s in al_sites])
+    vzz_rel = (al_vzz.max() - al_vzz.min()) / abs(al_vzz.mean())
+    assert vzz_rel < 1e-2, f"equivalent Al V_zz split {vzz_rel:.2e} rel: {al_vzz}"
+    assert (al_eta.max() - al_eta.min()) < 1e-2, f"equivalent Al η split: {al_eta}"
