@@ -270,6 +270,50 @@ def test_capacitor_charged_reference_calibrated_to_plates():
     assert float(d.std()) < 5e-3
 
 
+def _g0_vacuum_field(az, n_open):
+    """In-plane-averaged esm_delta_potential field [meV/Å] in deep vacuum for a
+    centered, in-plane-uniform (pure G∥=0), neutral, non-polar z-density. The
+    G∥=0 open-minus-periodic reference must equal the spectral periodic Hartree
+    that the SCF adds back, so a centered neutral slab feels NO uniform vacuum
+    field. Returns (slope_lo, slope_hi) [meV/Å] near the two box edges."""
+    from gradwave.core.energies.esm import esm_delta_potential
+
+    grid = build_fft_grid(np.diag([6.0, 6.0, az]), ecut=1.0,
+                          shape_override=(20, 20, n_open))
+    dz = az / n_open
+    zc = np.arange(n_open) * dz
+    c = 0.5 * az
+    # symmetric neutral z-profile: +2q core minus two q flanks (Σρ dz = 0)
+    w = 1.2
+    prof = (2.0 * np.exp(-((zc - c) ** 2) / (2 * w * w))
+            - np.exp(-((zc - c - 2.5) ** 2) / (2 * w * w))
+            - np.exp(-((zc - c + 2.5) ** 2) / (2 * w * w)))
+    prof = prof - prof.mean()  # exact neutrality on the grid
+    rho = torch.zeros((20, 20, n_open), dtype=torch.float64)
+    rho[:, :] = torch.as_tensor(prof, dtype=torch.float64)
+    dv = esm_delta_potential(rho, grid.cell, 2).mean(dim=(0, 1)).cpu().numpy()
+
+    def slope(mask):
+        A = np.vstack([zc[mask], np.ones(mask.sum())]).T
+        return np.linalg.lstsq(A, dv[mask], rcond=None)[0][0] * 1000.0
+
+    lo = (zc >= 1.0) & (zc <= c - 4.0)
+    hi = (zc >= c + 4.0) & (zc <= az - 1.0)
+    return slope(lo), slope(hi)
+
+
+def test_g0_reference_no_residual_vacuum_field():
+    """Regression: the G∥=0 open-minus-periodic reference is the SPECTRAL periodic
+    Hartree, so a centered neutral non-polar slab feels no residual uniform vacuum
+    field, and that field does not drift with vacuum thickness. The old real-space
+    wrapped-kernel reference left a ~O(100 meV/Å) same-sign field growing with Lz."""
+    lo1, hi1 = _g0_vacuum_field(24.0, 160)
+    lo2, hi2 = _g0_vacuum_field(30.0, 200)  # same dz=0.15
+    for s in (lo1, hi1, lo2, hi2):
+        assert abs(s) < 5.0, ("residual G∥=0 vacuum field", lo1, hi1, lo2, hi2)
+    assert abs(lo2 - lo1) < 2.0 and abs(hi2 - hi1) < 2.0, (lo1, hi1, lo2, hi2)
+
+
 def test_input_rejects_bad_boundary():
     """inputs validation guards the boundary knob."""
     from gradwave.inputs import InputError, SCFParams

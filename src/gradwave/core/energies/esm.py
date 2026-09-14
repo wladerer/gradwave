@@ -303,15 +303,28 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
                        torch.zeros_like(gpar))
     dv_hat = pref.unsqueeze(-1) * (conv_open - conv_per)
 
-    # G∥=0 channel: open 1D Coulomb (−|u|/2 kernel) minus the periodic one
-    # (background-neutralized, kernel −|u_wrap|/2 + u_wrap²/(2L)). Shared −|u|/2
-    # part cancels for a localized neutral ρ; the parabola/wrap is the image term.
+    # G∥=0 channel: open 1D Coulomb (−2π e² ∫|z−z'| s) minus the SPECTRAL periodic
+    # 1D Hartree of s (z-FFT, ×4π e²/Gz², 0 at Gz=0). The periodic reference must
+    # be EXACTLY the one hartree_potential_r adds back in the SCF: its G∥=0 column
+    # is the 1D spectral Hartree of this same in-plane-summed column s (a pure-z
+    # mode has G²=Gz², and hartree_potential_r's inv_g2 symmetrization is a no-op
+    # there). The old real-space wrapped kernel (−½|u_wrap|+u_wrap²/2L) is the
+    # *sampled continuum* periodic Green's function, whose DFT aliases away from
+    # 4π e²/Gz² for the non-decaying |u|/u² kernel — leaving a residual vacuum
+    # field that grows linearly with vacuum thickness. Because ρ_tot uses smooth
+    # Gaussian ions, differencing against the spectral reference stays grid-safe.
     s = rho_hat[0, 0, :]
     zc = torch.arange(nz, device=dev, dtype=rdt) * dz
     u = zc[:, None] - zc[None, :]
-    u_wrap = u - lz * torch.round(u / lz)
-    k0 = (-0.5 * u.abs()) - (-0.5 * u_wrap.abs() + u_wrap * u_wrap / (2.0 * lz))
-    dv00 = 4.0 * math.pi * E2 * dz * (k0.to(rho_hat.dtype) @ s)
+    v_open = -2.0 * math.pi * E2 * dz * (u.abs().to(rho_hat.dtype) @ s)
+    n_freq = torch.as_tensor(np.fft.fftfreq(nz, d=1.0 / nz).astype(np.float64),
+                             device=dev).to(rdt)
+    gz = 2.0 * math.pi * n_freq / lz
+    inv_gz2 = torch.where(gz * gz > _GPAR2_ZERO_TOL, 1.0 / (gz * gz),
+                          torch.zeros_like(gz))
+    mult = (4.0 * math.pi * E2 * inv_gz2).to(rho_hat.dtype)
+    v_per = torch.fft.ifft(mult * torch.fft.fft(s))
+    dv00 = v_open - v_per
     mask = torch.zeros((n_a, n_b), device=dev, dtype=dv_hat.dtype)
     mask[0, 0] = 1.0
     dv_hat = dv_hat * (1.0 - mask).unsqueeze(-1) + mask.unsqueeze(-1) * dv00
