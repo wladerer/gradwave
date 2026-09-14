@@ -112,16 +112,15 @@ a new bug. Until the spinor operator route lands (see the follow-up note above),
 raise NBANDS and treat the SOC ICOHP's absolute value as bracketed within a
 factor of ~2, not exact.
 
-QUANTITATIVE STATUS (NOT yet calibrated to LOBSTER — do not ship as such). No
-LOBSTER binary or fixture lives in this tree (checked: `nix search lobster`
-has no COHP package, only unrelated same-named packages; LOBSTER itself needs
-a separate free-for-academic-use license and binary this environment does not
-have), so what follows is a magnitude comparison against ONE published number,
-not a full cross-check:
-diamond (PBE) LOBSTER reports IpCOHP ~= -9.64 eV per C-C bond. Measured on
-diamond (PD_C_PBE_std, ecut 45 Ry, 2x2x2 UNREDUCED k-mesh, nbands=24 —
-tests/integration/test_cohp.py's `diamond_c` fixture, past the reference-leak
-knee above):
+QUANTITATIVE STATUS (calibrated 2026-09-13 against an external LOBSTER oracle).
+The George-group bonding database (Naik et al., Sci. Data 10:610 (2023)) is freely
+downloadable (CC-BY, Zenodo 10.5281/zenodo.8091844) -- no LOBSTER binary, no
+Materials-Project key; its references are VASP-PBE-PAW-derived. gradwave was
+calibrated on five solids; per-bond ICOHP (operator, resolve_images) gradwave vs
+LOBSTER: C -21.26/-9.586, Si -11.02/-4.495, GaAs -9.43/-4.350, MgO -1.835/-0.920,
+NaCl -1.003/-0.566 (full analysis in docs/plans/cohp-contracted-basis.md).
+Measured on the diamond_c fixture (PD_C_PBE_std, ecut 45 Ry, 2x2x2 UNREDUCED
+k-mesh, nbands=24; past the reference-leak knee above):
 
   1. Bond resolution — CLOSED by `resolve_images`, verified rather than assumed.
      The sublattice ICOHP (pairs=[(0,1)], resolve_images=False) is -83.5 eV,
@@ -134,16 +133,22 @@ knee above):
      <0.4%. `resolve_images` is a real, symmetry-verified per-bond
      decomposition, comparable in kind (though not yet magnitude — see #2) to
      LOBSTER's per-bond number.
-  2. Basis diffuseness — NOT closed, and the "operator overshoots ~2x /
-     eigenvalue undershoots ~2x, true value bracketed between" framing this
-     section used to give does NOT survive per-bond resolution at a
-     well-converged band count: at nbands=24 (past the leak-convergence knee),
-     the eigenvalue-route per-bond ICOHP is -20.4 eV, only ~2% below the
-     operator route's -21.0 eV — not a factor of ~2 apart. Both sit on the
-     SAME side of LOBSTER, at ~2.1-2.2x its -9.64 eV. What looked like a
-     bracket was really the eigenvalue route converging UP toward the operator
-     value as nbands grows (see the reference-leak table above), not two
-     independent estimates straddling the truth.
+  2. The ~2x magnitude gap is DOMINATED BY A SPIN REPORTING CONVENTION, not basis
+     diffuseness (an earlier version of this note blamed diffuseness -- wrong).
+     gradwave weights each off-site bond by factor 2 (block + Hermitian conjugate,
+     required by the sum rule and thus shared with LOBSTER) x g_spin=2, i.e. the
+     physical TWO-electron value, pinned to the band-structure energy by this
+     module's sum rule. LOBSTER's ICOHPLIST for a non-spin-polarized (ISPIN=1) run
+     stores the value under Spin.up ONLY, and pymatgen/lobsterpy do not double it,
+     so the reported/database number is per-spin (ONE-electron). Net: gradwave is
+     ~2x LOBSTER by convention. Across the five solids the raw ratio is a tight
+     1.77-2.45 (mean 2.12); dividing gradwave by 2 (equivalently x2 on LOBSTER)
+     collapses it to mean 1.06 (C 1.11, Si 1.23, GaAs 1.08, MgO 1.00, NaCl 0.89),
+     and the sign + full ordering (C>Si>GaAs>MgO>NaCl) match LOBSTER. Direction
+     inferred from pymatgen's Spin.up-only, non-doubling storage + the empirical
+     /2 collapse; confirm against a raw ICOHPLIST.lobster if one lands in-tree.
+     The ~10-20% residual AFTER /2 is the real, SECONDARY effect (see below):
+     norm-conserving pseudo- vs PAW/all-electron wavefunctions, covalent-biased.
 
      basis="iao" (the Knizia intrinsic atomic orbitals below, which span the
      occupied manifold exactly — charge_spilling collapses from 0.0038 to
@@ -158,14 +163,19 @@ knee above):
      the magnitude barely moves until rc drops below ~0.8x the bond length,
      and by the rc (~0.7 A) where it crosses -9.64 eV, charge_spilling has
      grown past 20% (from the untruncated basis's 0.0038) — i.e. it only
-     "matches" LOBSTER by no longer representing the occupied states. A real
-     fix needs an actual contracted/fitted local orbital (LOBSTER-style
-     minimal Slater-type basis tables), which is new machinery — per-element
-     basis data plus a fitting pipeline — not a parameter tweak on the existing
-     radial. Scoped, not started; see docs/plans/cohp-contracted-basis.md.
+     "matches" LOBSTER by no longer representing the occupied states. A real fix for the
+     residual needs an actual contracted/fitted local orbital on ALL-ELECTRON/PAW
+     wavefunctions (the PAW path, or FLAPW as the COHP source) -- the built
+     basis="contracted" (pseudo.sto_basis: an STO fit to PP_PSWFC + a tail_reg
+     localization penalty) does NOT close it (stays 2.1-2.2x for tail_reg<=0.3;
+     reaches ~1.2x only at tail_reg=3, where charge_spilling hits 27% and the
+     basis stops representing the occupied states). See
+     docs/plans/cohp-contracted-basis.md.
 Sign and bonding/antibonding shape are correct (diamond: COHP<0 valence, >0
 conduction; spilling physical after the projection-conjugation fix in
-core/pdos.py). Treat absolute solid-state ICOHP as not-yet-validated.
+core/pdos.py). Absolute per-bond ICOHP matches LOBSTER to a known ~2x spin
+convention (multiply LOBSTER ISPIN=1 by 2 to compare) and to ~+-10-20% after
+accounting for it; closing that residual is the PAW/all-electron path.
 """
 
 from __future__ import annotations
