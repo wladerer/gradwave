@@ -165,20 +165,40 @@ error_estimate: false
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "MEASURED (asus, 2026-09-14): Φ is NOT box-independent to the meV for "
+        "this NaH ESM slab. Φ(Lz=16)=5.1319, Φ(Lz=18)=5.1648 eV → |Δ|=33 meV, "
+        "and a wider sweep (16/18/20/24/28 Å, dz held at 1/6 Å) drifts "
+        "MONOTONICALLY without plateauing: Φ = 5.132/5.165/5.209/5.258/5.309 eV "
+        "(~2–13 meV/Å). E_F and BOTH per-face vacuum levels drift the same way, "
+        "so this is not a single-face-blend artifact. The `postscf.work_function` "
+        "docstring's 'exact because box-independent' is overstated for a dipolar / "
+        "diffuse-anion slab at practical vacuum thicknesses — box-independence "
+        "holds only in the field-free (ρ→0) limit, which this slab reaches slowly. "
+        "This gate encodes the CORRECT few-meV identity; it is xfail(strict) so a "
+        "future fix (or a convergence-adequate regime) flips it to XPASS and forces "
+        "removal of this marker. Do NOT loosen the tolerance to make it pass green."),
+)
 def test_work_function_box_independent_across_vacuum_thickness(tmp_path):
-    """Φ = E_vac − E_F is INVARIANT to the vacuum thickness under ESM open-boundary
-    electrostatics — the exactness claim in `postscf.work_function`'s docstring
-    ("box-independent" vacuum level). This gates that identity directly, with no
-    literature number and no convention: run the SAME NaH slab at two open-axis box
-    lengths and assert the two work functions agree to the meV.
+    """Φ = E_vac − E_F should be INVARIANT to the vacuum thickness under ESM
+    open-boundary electrostatics — the exactness claim in `postscf.work_function`'s
+    docstring ("box-independent" vacuum level). This gates that identity directly,
+    with no literature number and no convention: run the SAME NaH slab at two
+    open-axis box lengths and assert the two work functions agree to the meV.
 
     The gotcha (prior slab work): changing the box length at fixed ecut re-samples
     the FFT grid spacing dz, which alone injects meV-scale noise into E_vac. So we
     hold dz FIXED — Lz=16 Å with nz=96 and Lz=18 Å with nz=108 both give dz=1/6 Å
     exactly (the natural grids at ecut=24 Ry; pinned here via `fft_shape` so the
     identity is tested, not a grid coincidence). Only the vacuum thickness (where
-    ρ≈0) differs, so under true box-independence Φ moves only by SCF-convergence
-    noise, not by the ~Å the vacuum grew.
+    ρ≈0) differs, so under true box-independence Φ would move only by SCF-
+    convergence noise, not by the ~Å the vacuum grew.
+
+    CURRENT VERDICT: the identity FAILS (see the xfail reason) — Φ drifts ~33 meV
+    over a 2 Å box change and keeps drifting out to 28 Å. Kept as a strict-xfail
+    self-consistency gate so the audit finding lives in the suite.
     """
     import torch
 

@@ -13,11 +13,20 @@ absolute potential (≈ 4.44 V, Trasatti; ~0.1 V uncertainty),
 
 E_vac is read as the plane-averaged effective potential in the low-density
 region along the open axis (deep in the vacuum / at the grounded plate, where
-v_xc → 0 so v_eff is the electrostatic potential). This is exact for the ESM
-open-boundary modes (``open_z`` / ``open_z_metal``), where that level is
-box-independent; for a bare periodic slab it is only as good as the vacuum is
-converged. Asymmetric slabs have two different face potentials — see
-``work_function(..., both_faces=True)``.
+v_xc → 0 so v_eff is the electrostatic potential). Under the ESM open-boundary
+modes (``open_z`` / ``open_z_metal``) that level is box-independent *in the
+field-free limit* — i.e. where the density has actually decayed to zero at the
+sampled plane. That limit is NOT free: for a dipolar or diffuse-anion slab the
+vacuum reaches ρ≈0 only slowly, so Φ (and E_F, and the per-face vacuum levels)
+can drift with the vacuum thickness at practical box sizes. Measured on the
+NaH ESM slab, Φ drifts monotonically ~2–13 meV/Å out to a 28 Å box without
+plateauing (see
+``tests/integration/test_work_function_task.py::test_work_function_box_independent_across_vacuum_thickness``,
+a strict-xfail gate on the few-meV identity). So treat box-independence as a
+convergence property to CHECK per system (grow Lz until Φ plateaus), not an
+automatic exactness — and for a bare periodic slab it is likewise only as good
+as the vacuum is converged. Asymmetric slabs have two different face potentials
+— see ``work_function(..., both_faces=True)``.
 
 The convention-free reference is the **potential of zero charge** (the neutral
 Fermi level): ``U − U_PZC = Φ − Φ_PZC`` needs no external constant and is what
