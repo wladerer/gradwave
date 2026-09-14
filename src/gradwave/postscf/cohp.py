@@ -180,6 +180,7 @@ accounting for it; closing that residual is the PAW/all-electron path.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -210,6 +211,8 @@ from gradwave.scf.uspp_setup import USPPSystem
 
 if TYPE_CHECKING:
     from gradwave.scf.noncollinear import NCResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -757,8 +760,15 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     H~ = <phi~|H^|phi~> with the converged Kohn-Sham operator (energy-zero
     invariant, the correct route for solids); "eigenvalue" uses the band-limited
     P^dagger diag(eps) P (cheaper, but carries the plane-wave energy zero). The
-    operator route needs the norm-conserving KS Hamiltonian, so a USPP/PAW result
-    falls back to the eigenvalue route.
+    operator route is available for BOTH norm-conserving (SCFResult) and USPP/PAW
+    (USPPResult) SCF: for PAW it applies the converged PAW Hamiltonian and overlap
+    (`scf.uspp_loop._HkS`) to the AO projectors and builds H~ in the S-metric
+    Loewdin basis, H~ = O_S^{-1/2} <chi|H_PAW|chi> O_S^{-1/2} with the S-metric
+    projection becp_S = <chi|S|psi~>. This is sum-rule-exact and reference-
+    invariant, unlike the PAW eigenvalue route (which overcounts the band energy
+    by ~2-8%). It needs the converged v_eff/dscr the SCF now retains on the
+    USPPResult; a result without them (an old checkpoint) falls back to the
+    eigenvalue route with a logged warning.
 
     `resolve_images` restricts each pair to the single nearest image of atom j (the
     min-image bond) instead of the whole j sublattice, for a per-bond number
@@ -780,8 +790,22 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     """
     from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
-    use_op = method == "operator" and isinstance(res, SCFResult)
-    method = "operator" if use_op else "eigenvalue"
+    want_op = method == "operator"
+    use_op = want_op and isinstance(res, SCFResult)           # NC operator route
+    # PAW/USPP operator route: H~ = O_S^{-1/2} <chi|H_PAW|chi> O_S^{-1/2}, the
+    # converged PAW Hamiltonian applied to the AO projectors in the S-metric
+    # Loewdin basis. Sum-rule-exact and reference-invariant (unlike the PAW
+    # eigenvalue route H~ = P^dag diag(eps) P, which overcounts by ~2-8%). Needs
+    # the converged v_eff + screened D the SCF retained; a result without them
+    # (an old checkpoint) falls back to the eigenvalue route.
+    paw_op = (want_op and isinstance(res, USPPResult)
+              and res.v_eff is not None and res.dscr is not None)
+    if want_op and isinstance(res, USPPResult) and not paw_op:
+        logger.info(
+            "cohp: PAW operator route requested but this USPPResult carries no "
+            "converged v_eff/dscr (old checkpoint?); falling back to the "
+            "eigenvalue route (sum rule ~1.02-1.08, reference-leaking)")
+    method = "operator" if (use_op or paw_op) else "eigenvalue"
     if basis not in ("pswfc", "iao", "contracted"):
         raise ValueError(f"basis must be 'pswfc', 'iao', or 'contracted', got {basis!r}")
     if basis == "iao" and not use_op:
@@ -807,7 +831,13 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     w_augment = None
     q_full = None
     becps = None
-    if paw_reconstruct and isinstance(res, USPPResult) and basis == "pswfc":
+    if paw_reconstruct and paw_op:
+        # The operator route already carries the exact one-center D (via _HkS's
+        # screened D) and the S-metric projection; the eigenvalue-route becp
+        # augmentation modes do not apply and would double-count.
+        logger.info("cohp: paw_reconstruct ignored on the PAW operator route "
+                    "(the operator route is the sum-rule-exact replacement)")
+    if paw_reconstruct and not paw_op and isinstance(res, USPPResult) and basis == "pswfc":
         assert isinstance(system, USPPSystem)
         if paw_reconstruct is True or paw_reconstruct == "ae":
             recon_mode = "ae"
@@ -836,6 +866,7 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     band_window = -np.inf
     for isp in range(nspin):
         veff = None
+        veff_paw = dscr_paw = None
         if use_op:
             # use_op implies isinstance(res, SCFResult) above -- only
             # SCFResult carries v_eff (USPPResult has no such field, so
@@ -844,6 +875,10 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
             # eigenvalue-route USPP/PAW fallback, which never touches v_eff).
             assert isinstance(res, SCFResult)
             veff = res.v_eff if nspin == 1 else res.v_eff[isp]
+        elif paw_op:
+            assert isinstance(res, USPPResult)
+            assert res.v_eff is not None and res.dscr is not None
+            veff_paw, dscr_paw = res.v_eff[isp], res.dscr[isp]
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
             e = eig[isp, ik].to(device)
@@ -852,6 +887,34 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
                 occ_mask = (e < fermi) if fermi is not None \
                     else torch.ones_like(e, dtype=torch.bool)
                 q = _iao_projectors_k(q, c[occ_mask])            # occupied-span IAOs
+            if paw_op:
+                # PAW operator route: apply the converged H_PAW / S at this k to
+                # the AO projectors, build H~ in the S-metric Loewdin basis.
+                from gradwave.core.hamiltonian import projectors
+                from gradwave.scf.uspp_loop import _HkS
+                assert isinstance(system, USPPSystem)
+                assert veff_paw is not None and dscr_paw is not None
+                pd = system.proj_data[ik]
+                p = projectors(pd, system.positions).to(device)
+                hks = _HkS(sph, system.grid.shape, veff_paw, pd, p, dscr_paw,
+                           system.q_full.to(device))
+                schi = torch.einsum("pg,qg->pq", q.conj(), hks.s(q))   # <chi|S|chi>
+                hchi = torch.einsum("pg,qg->pq", q.conj(), hks.h(q))   # <chi|H|chi>
+                ois = o_inv_sqrt(schi)                                 # O_S^{-1/2}
+                htilde = ois @ hchi @ ois
+                # S-metric projection: becp_S = <chi|S|psi~>, then Loewdin-rotate.
+                becp_s = torch.einsum("pg,bg->bp", q.conj(), hks.s(c))
+                proj = becp_s @ ois
+                proj_per_k.append(proj)
+                htilde_per_k.append(htilde)
+                eig_per_k.append(e)
+                kw_flat.append(float(kw[ik]))
+                kpts.append(np.asarray(sph.k_frac, dtype=float))
+                cap_blocks.append((proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy())
+                occ_k = occ_all[ik] if nspin == 1 else occ_all[isp, ik]
+                occ_blocks.append(occ_k.cpu().numpy() / g_spin)
+                band_window = max(band_window, float(e.max()))
+                continue
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
             becp = torch.einsum("bg,pg->bp", c, q.conj())        # <chi_p|psi~>
             if recon_mode is not None:
