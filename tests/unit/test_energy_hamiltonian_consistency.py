@@ -723,7 +723,6 @@ def test_grad_energy_equals_hamiltonian_uspp_spinor_nc():
         aug_channels=_SPINOR_NC_GOOD_CHANNELS) < 1e-10
 
 
-@pytest.mark.slow
 @pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
 def test_grad_energy_equals_hamiltonian_uspp_spinor_nc_all_channels():
     """FULL four-channel augmentation (rrkjus): exposes the m_y sign bug — the
@@ -734,7 +733,6 @@ def test_grad_energy_equals_hamiltonian_uspp_spinor_nc_all_channels():
         aug_channels=(0, 1, 2, 3)) < 1e-10
 
 
-@pytest.mark.slow
 @pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
 def test_grad_energy_equals_hamiltonian_paw_spinor_nc_all_channels():
     """FULL four-channel augmentation (kjpaw): the same m_y sign bug, now also
