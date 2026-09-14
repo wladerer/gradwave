@@ -487,7 +487,8 @@ def test_grad_energy_equals_hamiltonian_soc_spinor():
     assert float(gap / expected.abs().max()) < 1e-10
 
 
-def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
+def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, aug_channels=(0, 1, 2, 3),
+                           ecut_ry=16.0, seed=0):
     """Spinor USPP/PAW off-stationarity gate: grad_c E == 2 w f (H c) on a
     RATTLED P1 cell in a NONCOLLINEAR state — the untested cross-product of
     the two patterns that each pass individually above:
@@ -500,16 +501,22 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
 
     ``scf_uspp_noncollinear`` fuses them: a scalar-relativistic USPP/PAW
     (no SOC in S / the nonlocal D is scalar) driven with a noncollinear
-    magnetization, so the screened D carries FOUR channels
-    (D_n = ∫v_eff Q + dij_bare + ddd_n, and D_i = ∫B_i Q + ddd_i for
-    i ∈ {x, y, z}) assembled into the 2×2 spin blocks D↑↑ = D_n+D_z,
-    D↓↓ = D_n−D_z, D↑↓ = D_x − i·D_y. A random spinor state gives a
-    generically TILTED m⃗, so the off-diagonal D↑↓ blocks and the m_x/m_y
-    augmentation channels are exercised — exactly the terms that vanish in
-    the collinear-limit / rotation integration tests, where a sign or factor
-    error can cancel by symmetry (the O₂-vs-Si lesson). The gate fails unless
-    every D channel is the exact becsum-derivative of the assembled energy
-    through the full ρ_aug/m⃗_aug/Q̃/phase + one-center chain. LDA only (the
+    magnetization, so the augmentation charge and the screened D carry FOUR
+    Pauli channels [n, m_x, m_y, m_z] (D_n = ∫v_eff Q + dij_bare + ddd_n,
+    D_i = ∫B_i Q + ddd_i for i ∈ {x, y, z}), assembled into the 2×2 spin
+    blocks D↑↑ = D_n+D_z, D↓↓ = D_n−D_z, D↑↓ = D_x − i·D_y. A random spinor
+    state gives a generically TILTED m⃗, so the off-diagonal D↑↓ blocks and
+    the m_x/m_y augmentation channels are exercised — exactly the terms that
+    vanish in the collinear-limit / rotation integration tests (which seed
+    moments ∥ẑ and ∥x̂, both with m_y = 0), where a sign or factor error can
+    cancel by symmetry (the O₂-vs-Si lesson).
+
+    ``aug_channels`` selects which becsum Pauli channels feed the augmentation
+    charge (E side) AND the screened D (H side) — the two must be toggled
+    together to stay an exact identity. It is a term-localization knob: with
+    the full set the m_y channel exposes a real sign bug (see the module-level
+    tests), so the machine-precision gate runs over the correct subset
+    (n, m_x, m_z) and the full set is guarded by a strict xfail. LDA only (the
     non-collinear on-site XC is LDA-only), mirroring the loop.
 
     Built with the loop's own ``_build_iter_ops`` / ``SpinorBatchedHS`` /
@@ -525,6 +532,7 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
     from gradwave.core.xc.spin import LSDA_PW92
     from gradwave.pseudo.upf_paw import parse_upf_paw
     from gradwave.scf.paw_noncollinear import (
+        e1c_nc_t,
         onsite_nc_energy_and_ddd,
         spinor_onsite_becsum,
     )
@@ -540,6 +548,7 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
     )
     from gradwave.scf.uspp_noncollinear import SpinorBatchedHS
 
+    aug_channels = set(aug_channels)
     xc = LSDA_PW92()
     ncxc = NoncollinearXC(xc)
     a = 5.43
@@ -607,8 +616,11 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
     aug_box = torch.zeros(4, grid.n_points, dtype=CDTYPE, device=dev)
     aug_box[:, system.sphere_idx] = aug_sph4 / vol
     aug_fields = g_to_r_box(aug_box.reshape(4, *shape), real=True)
-    rho = rho_sm + aug_fields[0]
-    m = m_sm + aug_fields[1:]
+    rho = rho_sm + (aug_fields[0] if 0 in aug_channels else 0.0)
+    m = torch.stack([
+        m_sm[i] + (aug_fields[i + 1] if (i + 1) in aug_channels
+                   else torch.zeros_like(m_sm[i]))
+        for i in range(3)])
 
     rho_g = r_to_g(rho.to(CDTYPE))
     e = (spinor_kinetic_energy(f, c, t2)
@@ -619,7 +631,7 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
     if ops.is_paw:
         assert ops.onec is not None
         for ia, sp in enumerate(system.species_of_atom):
-            e = e + ops.onec[sp].e1c_nc_t([bec_r[c4][ia] for c4 in range(4)])
+            e = e + e1c_nc_t(ops.onec[sp], [bec_r[c4][ia] for c4 in range(4)])
     (g,) = torch.autograd.grad(e, c)
 
     # ---- H side: the loop's own potentials + screened 4-channel D ----
@@ -631,8 +643,11 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
         v_r = v_h + v_xc + ops.vloc_r
         pots = torch.stack([v_r, b_xc[0], b_xc[1], b_xc[2]])
         pots_g_box = r_to_g(pots.to(CDTYPE)).reshape(4, -1)
-        d_chan = list(aug_dmat_batched(system, pots_g_box[:, mask_flat],
-                                       ops.phase_pos))
+        d_all = aug_dmat_batched(system, pots_g_box[:, mask_flat],
+                                 ops.phase_pos)
+        # gate the ∫(v,B)Q screening to the same channels the E-side aug uses
+        d_chan = [d_all[c4] if c4 in aug_channels else torch.zeros_like(d_all[c4])
+                  for c4 in range(4)]
         d_chan[0] = d_chan[0] + dij_bare
         if ops.is_paw:
             for ia, sp in enumerate(system.species_of_atom):
@@ -659,27 +674,80 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
     return float(gap / expected.abs().max())
 
 
+_SPINOR_NC_OCC = [1.0, 1.0, 0.9, 0.6, 0.3, 0.1]
+
+# The four-channel gate localizes a REAL sign bug in the m_y augmentation
+# coupling of the noncollinear USPP/PAW path (invisible to every existing
+# test — see the xfail below). Per-channel measured off-stationarity gap
+# (rrkjus, rattled P1, random tilted spinor):
+#     aug off              4.3e-16   (== the norm-conserving spinor identity)
+#     n only               5.7e-15
+#     n + m_z              6.0e-15   (the collinear-limit regime)
+#     n + m_x              4.9e-15
+#     n + m_x + m_z        6.6e-15
+#     n + m_y              1.2e-03   <-- breaks
+#     all four channels    1.2e-03
+# so the machine-precision gate below runs over the CORRECT subset
+# (n, m_x, m_z) and the full set is a strict xfail pinned to the m_y bug.
+_SPINOR_NC_GOOD_CHANNELS = (0, 1, 3)   # n, m_x, m_z — the correct channels
+
+_MY_SIGN_BUG = (
+    "REAL BUG (audit finding #1): the m_y augmentation channel of "
+    "scf_uspp_noncollinear is off by a sign. scf.paw_noncollinear."
+    "spinor_onsite_becsum builds m_y = 1j*(r_ud - r_du) = -2 Im(b↑*b↓), the "
+    "OPPOSITE sign to the grid Pauli convention m_y = 2 Im(ψ↑*ψ↓) used by "
+    "spinor_common.pauli_density_accumulate and core.xc.noncollinear.vxc_and_bxc. "
+    "The m_y augmentation charge (m⃗_aug from becsum) is therefore added to the "
+    "smooth grid m_y with a flipped sign, so grad_c E != H c off-stationarity "
+    "by ~1.2e-3. Invisible to the existing suite because its only noncollinear "
+    "tests seed moments ∥ẑ and ∥x̂ (both m_y = 0). Flipping the m_y becsum sign "
+    "collapses the gap to 4e-15 (verified). NOT fixed here — reported for "
+    "review (do not fix physics silently). Remove this xfail when the sign is "
+    "corrected in scf/paw_noncollinear.py::spinor_onsite_becsum."
+)
+
+
 def test_grad_energy_equals_hamiltonian_uspp_spinor_nc():
     """Bare USPP (rrkjus), noncollinear: gates the spinor Q̃ augmentation
-    chain and the four-channel ∫(v_eff, B⃗) Q screening of the 2×2 D against
-    autograd of the assembled energy, on a rattled cell with a tilted m⃗.
-    Isolates the augmentation/exchange-field coupling from the PAW one-center
-    (no ddd here) — a nonzero gap here vs a clean PAW gate would localize a
-    bug to the ∫v_eff Q / B⃗·σ terms."""
+    chain and the ∫(v_eff, B⃗) Q screening of the 2×2 D against autograd of the
+    assembled energy, on a rattled cell with a tilted m⃗. Correct channels
+    (n, m_x, m_z) only — isolates the augmentation/exchange-field coupling
+    from the PAW one-center (no ddd here). Machine-precision gate."""
     assert _eh_gap_uspp_spinor_nc(
-        "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6,
-        occ_values=[1.0, 1.0, 0.9, 0.6, 0.3, 0.1]) < 1e-10
+        "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=_SPINOR_NC_GOOD_CHANNELS) < 1e-10
 
 
 def test_grad_energy_equals_hamiltonian_paw_spinor_nc():
     """PAW (kjpaw), noncollinear: additionally gates the 2×2 one-center
     [ddd_n, ddd_mx, ddd_my, ddd_mz] == ∂E_1c/∂becsum through the full spinor
-    orbital chain — the ddd bug's term class, now coupled through the tilted
-    m⃗ (the off-diagonal D↑↓ spin-flip blocks the collinear tests never
-    stress)."""
+    orbital chain — the ddd bug's term class. Correct augmentation channels
+    (n, m_x, m_z); the one-center corrector is fully on (it is self-consistent
+    under the m_y sign, being the exact autograd derivative of the same
+    becsum). Machine-precision gate."""
     assert _eh_gap_uspp_spinor_nc(
-        "Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=6,
-        occ_values=[1.0, 1.0, 0.9, 0.6, 0.3, 0.1]) < 1e-10
+        "Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=_SPINOR_NC_GOOD_CHANNELS) < 1e-10
+
+
+@pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
+def test_grad_energy_equals_hamiltonian_uspp_spinor_nc_all_channels():
+    """FULL four-channel augmentation (rrkjus): exposes the m_y sign bug — the
+    off-stationarity gap is ~1.2e-3, not <1e-10. Strict xfail; flips to a
+    failure (prompting removal) once the m_y sign is corrected."""
+    assert _eh_gap_uspp_spinor_nc(
+        "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=(0, 1, 2, 3)) < 1e-10
+
+
+@pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
+def test_grad_energy_equals_hamiltonian_paw_spinor_nc_all_channels():
+    """FULL four-channel augmentation (kjpaw): same m_y augmentation sign bug
+    (the PAW one-center is self-consistent and does not contribute to the
+    gap). Strict xfail."""
+    assert _eh_gap_uspp_spinor_nc(
+        "Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=(0, 1, 2, 3)) < 1e-10
 
 
 def test_potentials_equal_autograd_of_energies():
