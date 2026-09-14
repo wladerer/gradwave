@@ -52,6 +52,25 @@ def test_equivalent_atoms_agree(bct_converged):
 
 
 @pytest.mark.standard
+def test_symmetry_dev_vanishes_at_fixed_point(bct_converged):
+    """MR: at a converged symmetric fixed point the RAW (pre-symmetrization) muffin-tin density of
+    symmetry-equivalent atoms must agree — that relative deviation is exactly ``symmetry_dev``, the
+    diagnostic the loop computes each iteration but had never asserted. The two body-centred O atoms
+    form one symmetry orbit, so with ``use_symmetry=True`` (which populates ``atom_orbits`` and thus
+    ``symmetry_dev``) a few iterations from the converged potential must leave the raw
+    equivalent-site density asymmetry at the numerical floor. An order-unity value would mean the
+    wedge sum sits in a symmetry-broken basin (the class of silent failure — equivalent atoms
+    disagreeing — that first surfaced as the smeared-TiO2 instability); it is checked here on the
+    raw density, needing no reference data and no forced symmetrization to mask a per-atom bug."""
+    _, info0 = bct_converged
+    _, info = crystal_scf_multi(BCT_A, BCT_ATOMS, BCT_R, use_symmetry=True,
+                                v_start=info0["v_by_key"], **{**BCT_KW, "iters": 6, "efg": False})
+    sym_dev = info["symmetry_dev"]
+    assert sym_dev is not None, "use_symmetry=True on equivalent atoms must expose symmetry_dev"
+    assert sym_dev < 1e-3, f"raw equivalent-site density asymmetry {sym_dev:.2e} — broken basin?"
+
+
+@pytest.mark.standard
 def test_ibz_matches_full_mesh_at_fixed_point(bct_converged):
     """MR: from one converged potential, a few IBZ iterations and a few full-mesh iterations must
     stay on the same fixed point (span and EFG agree). Anchoring at the fixed point isolates the
