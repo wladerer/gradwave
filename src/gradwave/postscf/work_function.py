@@ -14,19 +14,25 @@ absolute potential (≈ 4.44 V, Trasatti; ~0.1 V uncertainty),
 E_vac is read as the plane-averaged effective potential in the low-density
 region along the open axis (deep in the vacuum / at the grounded plate, where
 v_xc → 0 so v_eff is the electrostatic potential). Under the ESM open-boundary
-modes (``open_z`` / ``open_z_metal``) that level is box-independent *in the
-field-free limit* — i.e. where the density has actually decayed to zero at the
-sampled plane. That limit is NOT free: for a dipolar or diffuse-anion slab the
-vacuum reaches ρ≈0 only slowly, so Φ (and E_F, and the per-face vacuum levels)
-can drift with the vacuum thickness at practical box sizes. Measured on the
-NaH ESM slab, Φ drifts monotonically ~2–13 meV/Å out to a 28 Å box without
-plateauing (see
-``tests/integration/test_work_function_task.py::test_work_function_box_independent_across_vacuum_thickness``,
-a strict-xfail gate on the few-meV identity). So treat box-independence as a
-convergence property to CHECK per system (grow Lz until Φ plateaus), not an
-automatic exactness — and for a bare periodic slab it is likewise only as good
-as the vacuum is converged. Asymmetric slabs have two different face potentials
-— see ``work_function(..., both_faces=True)``.
+modes (``open_z`` / ``open_z_metal``) that level is *intended* to be
+box-independent (the ESM Green's function forces v_H→0 as z→±∞, so a slab feels
+no z-images). MEASURED CAVEAT (asus, 2026-09-14): this box-independence does NOT
+currently hold to the meV. On the NaH ESM slab Φ drifts monotonically ~2–13
+meV/Å out to a 28 Å box without plateauing; on a COMPACT-density 4-layer Al(100)
+metal slab — whose valence density decays fast, ruling out a diffuse-tail
+explanation — Φ drifts an order of magnitude MORE (~110 meV/Å, 3.30→4.63 eV over
+Lz=16→28 Å, no plateau). Both E_F and E_vac drift, by different amounts, so the
+gauge does not cancel in Φ=E_vac−E_F, and the ESM "vacuum" is not field-free: a
+~343 meV/Å residual slope in the plane-averaged v_eff is measured where ρ≈1e-4.
+This points at a real ESM electrostatics residual affecting all ESM
+work-function / electrode-potential results, not a diffuse-anion convergence
+artifact (see the two strict-xfail gates in
+``tests/integration/test_work_function_task.py`` —
+``test_work_function_box_independent_across_vacuum_thickness`` (NaH) and
+``test_work_function_box_independent_al_metal`` (Al)). Until this is fixed, treat
+Φ as vacuum-thickness dependent: report the Lz used and hold it fixed for
+cross-run comparisons. Asymmetric slabs have two different face potentials —
+see ``work_function(..., both_faces=True)``.
 
 The convention-free reference is the **potential of zero charge** (the neutral
 Fermi level): ``U − U_PZC = Φ − Φ_PZC`` needs no external constant and is what
