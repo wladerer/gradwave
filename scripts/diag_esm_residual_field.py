@@ -61,8 +61,13 @@ def build_symmetric_al_slab(nz, dz, nlayers=4):
     zs_hi = [C + (k + 0.5) * d for k in range(half)]
     zs_lo = [C - (k + 0.5) * d for k in reversed(range(half))]
     zs = zs_lo + zs_hi
-    xy = [p1 if (k % 2 == 1) else p0 for k in range(nlayers)]
-    for k in range(nlayers):  # enforce palindrome in xy (mirror partner match)
+    # palindromic xy so the slab is strictly mirror-symmetric about z=C in 3D
+    # (fcc(100)'s true ABAB stack is not a palindrome for even layers; the
+    # in-plane average of rho(z) is xy-independent anyway, so a symmetric
+    # neutral Al slab is the right diagnostic object here).
+    xy_half = [p0 if (k % 2 == 0) else p1 for k in range(half)]
+    xy = xy_half + xy_half[::-1]
+    for k in range(nlayers):
         assert np.allclose(xy[k], xy[nlayers - 1 - k]), "xy not palindromic"
     pos = np.array([[xy[k][0], xy[k][1], zs[k]] for k in range(nlayers)])
     return cell, pos
