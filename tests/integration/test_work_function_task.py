@@ -123,3 +123,96 @@ def test_both_faces_split_for_dipolar_slab(tmp_path):
     for i in range(2):
         assert phi[i] == pytest.approx(evac[i] - fermi, abs=1e-6)
         assert 0.0 < phi[i] < 12.0
+
+
+def _nah_input_lz(tmp_path: Path, lz: float):
+    """The same NaH slab as `_nah_input`, but with the open-axis box length `lz`
+    a free parameter (the slab atoms stay at fixed absolute z, 6.5 and 9.0 Å —
+    only the vacuum above H⁻ grows). Tighter tolerances than the wiring test: the
+    box-independence gate compares two Φ to the meV, so the SCF must be converged
+    well below that."""
+    from gradwave.inputs import load_input
+
+    body = f"""
+structure:
+  cell: [[7.0, 0.0, 0.0], [0.0, 7.0, 0.0], [0.0, 0.0, {lz}]]
+  positions:
+    cart: [[3.5, 3.5, 6.5], [3.5, 3.5, 9.0]]
+  species: [Na, H]
+pseudopotentials:
+  dir: {PSEUDOS}
+  map: {{Na: Na_ONCV_PBE_sr.upf, H: H_ONCV_PBE-1.2.upf}}
+ecut: {24 * RY}
+xc: pbe
+kpoints:
+  mesh: [1, 1, 1]
+smearing:
+  type: fermi-dirac
+  width: 0.1
+scf:
+  boundary: open_z
+  max_iter: 120
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+output:
+  dir: {tmp_path}
+  checkpoint: false
+error_estimate: false
+"""
+    p = tmp_path / f"in_lz{lz}.yaml"
+    p.write_text(body)
+    return load_input(p)
+
+
+@pytest.mark.slow
+def test_work_function_box_independent_across_vacuum_thickness(tmp_path):
+    """Φ = E_vac − E_F is INVARIANT to the vacuum thickness under ESM open-boundary
+    electrostatics — the exactness claim in `postscf.work_function`'s docstring
+    ("box-independent" vacuum level). This gates that identity directly, with no
+    literature number and no convention: run the SAME NaH slab at two open-axis box
+    lengths and assert the two work functions agree to the meV.
+
+    The gotcha (prior slab work): changing the box length at fixed ecut re-samples
+    the FFT grid spacing dz, which alone injects meV-scale noise into E_vac. So we
+    hold dz FIXED — Lz=16 Å with nz=96 and Lz=18 Å with nz=108 both give dz=1/6 Å
+    exactly (the natural grids at ecut=24 Ry; pinned here via `fft_shape` so the
+    identity is tested, not a grid coincidence). Only the vacuum thickness (where
+    ρ≈0) differs, so under true box-independence Φ moves only by SCF-convergence
+    noise, not by the ~Å the vacuum grew.
+    """
+    import torch
+
+    from gradwave.api._slab import resolve_slab_box
+    from gradwave.api.scf import run_scf
+    from gradwave.api.system import _is_uspp, _species_upfs, build_scaled_system
+    from gradwave.postscf.work_function import work_function
+
+    torch.set_num_threads(6)
+
+    def phi_at(lz: float, nz: int) -> float:
+        inp = _nah_input_lz(tmp_path, lz)
+        assert inp.scf.boundary == "open_z"
+        _species, upfs, soa = _species_upfs(inp)
+        # mirror build_system's NC path exactly, but PIN the FFT box so dz is
+        # identical across the two Lz (nx=ny=42 unchanged; nz scales with Lz).
+        box = resolve_slab_box(inp, upfs, soa)
+        assert box.cell[2, 2] == pytest.approx(lz)
+        system = build_scaled_system(
+            inp, upfs, _is_uspp(upfs), soa, box.cell, box.positions,
+            fft_shape=(42, 42, nz))
+        # dz identical between the two boxes is the whole point of the gate
+        assert system.grid.cell[2, 2] / system.grid.shape[2] == pytest.approx(
+            1.0 / 6.0, abs=1e-9)
+        res = run_scf(inp, system=system, verbose=False)
+        assert res.converged
+        return work_function(res, open_axis=2)
+
+    phi_16 = phi_at(16.0, 96)
+    phi_18 = phi_at(18.0, 108)
+    # box-independence: the vacuum level (hence Φ) is the same absolute reference
+    # regardless of how much vacuum sits above the slab. A few meV covers residual
+    # SCF-convergence noise; a materially larger drift would mean the docstring's
+    # "exact because box-independent" claim is overstated (report, don't loosen).
+    assert abs(phi_16 - phi_18) < 5e-3, (
+        f"Φ drifts with vacuum thickness: Φ(Lz=16)={phi_16:.6f} eV, "
+        f"Φ(Lz=18)={phi_18:.6f} eV, |Δ|={abs(phi_16 - phi_18) * 1e3:.3f} meV")
