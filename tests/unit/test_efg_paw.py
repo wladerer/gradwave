@@ -1,13 +1,21 @@
-"""Plane-wave/PAW EFG (``postscf.efg_paw``): laptop-safe, synthetic unit tests.
+"""Plane-wave/PAW EFG (``postscf.efg_paw``): synthetic unit tests + one end-to-end gate.
 
-Covers the three additive pieces independently — the ionic Ewald lattice sum vs a direct
-real-space point-charge sum, the smooth-density reciprocal term's symmetry, and the on-site
-l=2 operator's Gaunt/selection algebra — plus the tensor-observable conventions. No SCF; the
-end-to-end cross-validation against FLAPW/Elk runs on asus (see the PR body)."""
+Most of this file covers the three additive pieces independently — the ionic Ewald lattice sum
+vs a direct real-space point-charge sum, the smooth-density reciprocal term's symmetry, and the
+on-site l=2 operator's Gaunt/selection algebra — plus the tensor-observable conventions, with no
+SCF. The magnitude cross-validation against Elk lives in the torture-tier FLAPW test.
+
+``test_efg_paw_equivalent_sites_agree`` (STANDARD tier) closes the gap those synthetic tests
+leave open: it runs a real PW/PAW SCF (α-Al₂O₃ corundum, where all four Al are one symmetry
+orbit and all six O another) and asserts that crystallographically equivalent nuclei get
+identical ``(V_zz, η)``. This is the convention-free site-equivalence gate the NMR shielding path
+already carries (``postscf.kgeometry_nmr._symmetrize_site_tensors`` + its test) ported to the EFG
+route: cheaper than the external Elk bracket and free of any single published number."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.constants import E2
@@ -16,9 +24,11 @@ from gradwave.postscf.efg_paw import (
     _efg_angular_tensor,
     _tensor_observables,
     _traceless,
+    efg_paw,
     ionic_efg,
     smooth_density_efg,
 )
+from tests.helpers import RY, pseudo
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +283,82 @@ def test_efg_onsite_rejects_non_paw_dataset():
     stub = SimpleNamespace(element="O", is_paw=False, aewfc=())
     with pytest.raises(ValueError, match="needs a PAW dataset"):
         EFGOnSite.from_paw(stub)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# end-to-end site-equivalence gate (the audit's within-repo EFG check)
+# ---------------------------------------------------------------------------
+# α-Al₂O₃ corundum primitive cell (R-3c #167). All four Al are one symmetry
+# orbit and all six O another (verified: find_spacegroup → 12 ops, O orbit
+# {4,5,6,7,8,9}), so crystallographically each set is a single equivalent
+# family — the convention-free identity the EFG must respect. Cell in bohr and
+# fractional atoms mirror tests/integration/test_flapw_efg_vs_elk.py.
+_CORUNDUM_CELL_BOHR = np.array([[4.497737, 2.596770, 8.184592],
+                                [-4.497737, 2.596770, 8.184592],
+                                [-0.000000, -5.193539, 8.184592]])
+_CORUNDUM_FRAC = np.array([
+    [0.352160, 0.352160, 0.352160], [0.147840, 0.147840, 0.147840],
+    [0.647840, 0.647840, 0.647840], [0.852160, 0.852160, 0.852160],
+    [0.250000, 0.556240, 0.943760], [0.056240, 0.750000, 0.443760],
+    [0.556240, 0.943760, 0.250000], [0.443760, 0.056240, 0.750000],
+    [0.943760, 0.250000, 0.556240], [0.750000, 0.443760, 0.056240]])
+# species index into the pseudo list: 0 = Al (atoms 0-3), 1 = O (atoms 4-9)
+_CORUNDUM_SPECIES = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+
+
+@pytest.mark.standard
+def test_efg_paw_equivalent_sites_agree():
+    """Crystallographically equivalent nuclei must give identical (V_zz, η).
+
+    Runs a real PW/PAW SCF on α-Al₂O₃ corundum with the committed kjpaw datasets and asserts
+    that the four (equivalent) Al sites — and, separately, the six (equivalent) O sites — carry
+    the same V_zz and η. This is the convention-free equivalence identity ``efg_paw`` had no
+    within-repo test for: a per-site assembly bug (the shielding σ_dq class, where equivalent
+    sites split) is caught here without any external reference number.
+
+    The SCF runs at Γ (``use_symmetry=False``, no k-reduction), so the per-site EFG is assembled
+    from a density whose site symmetry is only as good as the full-BZ sampling makes it — i.e. the
+    tolerance is a genuine noise floor, not the machine-precision a symmetry-projected density
+    would give. Measured spread on asus (6 threads, ecut=25 Ry): V_zz agrees to ~1.5e-6 relative
+    and η to <3e-6 across each orbit; the 1e-3 gate below sits ~600× above that floor while
+    staying ~100× tighter than a real per-site split would be. NB: the Γ / low-ecut magnitude is
+    not physically converged (that anchor is the torture-tier Elk test); only the equivalence is."""
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+    torch.set_num_threads(6)
+    from gradwave.constants import BOHR_ANG
+
+    cell_ang = _CORUNDUM_CELL_BOHR * BOHR_ANG
+    pos_cart = _CORUNDUM_FRAC @ cell_ang
+    paws = [parse_upf_paw(pseudo("Al.pbe-n-kjpaw_psl.1.0.0.UPF")),
+            parse_upf_paw(pseudo("O.pbe-n-kjpaw_psl.1.0.0.UPF"))]
+    system = setup_uspp(cell_ang, pos_cart, _CORUNDUM_SPECIES, paws, ecut=25 * RY,
+                        kmesh=(1, 1, 1), use_symmetry=False)
+    res = scf_uspp(system, PBE(), etol=1e-8, rhotol=1e-7, diago_tol=1e-9,
+                   verbose=False, max_iter=100)
+    assert res["converged"]
+
+    entries = efg_paw(res)
+    al = [(e["V_zz"], e["eta"]) for e in entries if e["element"] == "Al"]
+    ox = [(e["V_zz"], e["eta"]) for e in entries if e["element"] == "O"]
+    assert len(al) == 4 and len(ox) == 6
+
+    for label, grp in (("Al", al), ("O", ox)):
+        vzz = np.array([g[0] for g in grp])
+        eta = np.array([g[1] for g in grp])
+        assert np.isfinite(vzz).all() and np.isfinite(eta).all()
+        vzz_spread = float(vzz.max() - vzz.min())
+        rel = vzz_spread / max(abs(float(vzz.mean())), 1e-30)
+        eta_spread = float(eta.max() - eta.min())
+        # the equivalence gate: same V_zz and η across the orbit
+        assert rel < 1e-3, f"{label} V_zz split {rel:.2e} rel across equivalent sites: {vzz}"
+        assert eta_spread < 1e-3, f"{label} η split {eta_spread:.2e} across equivalent sites: {eta}"
+
+    # light convention-free character anchors (sign / axiality), not magnitude:
+    # the corundum Al site is axial (η≈0) with V_zz<0; O carries a finite η.
+    al_vzz = np.array([g[0] for g in al])
+    al_eta = np.array([g[1] for g in al])
+    assert (al_vzz < 0).all(), f"Al V_zz should be negative (Elk sign): {al_vzz}"
+    assert (al_eta < 0.05).all(), f"Al site is axial; η={al_eta}"
