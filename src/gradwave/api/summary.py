@@ -54,6 +54,21 @@ def _summary_head(task: str) -> dict[str, Any]:
     }
 
 
+def _mixing_params_block(inp: Input, res: Any = None) -> dict[str, Any]:
+    """The ``parameters.mixing`` sub-dict, shared by ``build_summary`` (with a
+    materialized SCF ``res``) and the result-free parameters block for relax /
+    magnetism. ``res=None`` reports ``kerker_used: None`` (there is no live
+    result to read the resolved Kerker flag from)."""
+    return {
+        "scheme": inp.scf.mixing.scheme,
+        "alpha": float(inp.scf.mixing.alpha),
+        "history": inp.scf.mixing.history,
+        "kerker": inp.scf.mixing.kerker,
+        "kerker_used": _get(res, "kerker_used") if res is not None else None,
+        "precond": inp.scf.mixing.precond,
+    }
+
+
 def _xc_label(inp: Input) -> str:
     """The functional name for the report: the hybrid label (pbe0/hse) when a
     hybrid is enabled, else the plain semilocal xc."""
@@ -201,14 +216,7 @@ def build_summary(res: SCFLike, inp: Input, task: str,
             "smearing": inp.smearing.type,
             "width_eV": float(inp.smearing.width),
             "symmetry": bool(inp.symmetry),
-            "mixing": {
-                "scheme": inp.scf.mixing.scheme,
-                "alpha": float(inp.scf.mixing.alpha),
-                "history": inp.scf.mixing.history,
-                "kerker": inp.scf.mixing.kerker,
-                "kerker_used": _get(res, "kerker_used"),
-                "precond": inp.scf.mixing.precond,
-            },
+            "mixing": _mixing_params_block(inp, res),
             "n_electrons": float(system.n_electrons),
             "nbands": int(system.nbands),
             "fft_grid": list(system.grid.shape),
@@ -956,13 +964,6 @@ def _parameters_block(inp: Input) -> dict[str, Any]:
         "smearing": inp.smearing.type,
         "width_eV": float(inp.smearing.width),
         "symmetry": bool(inp.symmetry),
-        "mixing": {
-            "scheme": inp.scf.mixing.scheme,
-            "alpha": float(inp.scf.mixing.alpha),
-            "history": inp.scf.mixing.history,
-            "kerker": inp.scf.mixing.kerker,
-            "kerker_used": None,
-            "precond": inp.scf.mixing.precond,
-        },
+        "mixing": _mixing_params_block(inp),
         "pseudos": {s: inp.pseudo_map[s] for s in species},
     }

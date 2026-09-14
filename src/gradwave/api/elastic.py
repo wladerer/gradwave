@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from gradwave.api._common import build_xc, time_reversal_ok
+from gradwave.api._common import build_xc, resolve_n_workers, time_reversal_ok
 from gradwave.api.scf import run_scf
 from gradwave.api.system import (
     _fft_grid,
     _is_uspp,
     _species_upfs,
+    _worker_setup,
     build_scaled_system,
 )
 from gradwave.constants import EV_A3_TO_GPA
@@ -28,12 +29,12 @@ logger = logging.getLogger(__name__)
 # --- elastic (strain spokes; clamped-ion only) -----------------------------
 def _elastic_rebuild(inp: Input) -> tuple[Any, bool, Any, Any, bool]:
     """Reconstruct ``(upfs, uspp, species_of_atom, xc, is_fr)`` from ``inp``
-    inside a worker, mirroring run_elastic's setup."""
-    _species, upfs, soa = _species_upfs(inp)
-    uspp = _is_uspp(upfs)
-    is_fr = any(b.j is not None for u in upfs for b in u.betas)
-    xc: Any = build_xc(inp)
-    return upfs, uspp, soa, xc, is_fr
+    inside a worker, mirroring run_elastic's setup. ``xc`` comes from
+    ``build_xc`` (not the collinear ``WorkerSetup.xc``) so a noncollinear/spinor
+    elastic run gets the ``NoncollinearXC``-wrapped functional its stress path
+    needs."""
+    s = _worker_setup(inp)
+    return s.upfs, s.uspp, s.species_of_atom, build_xc(inp), s.is_fr
 
 
 def _elastic_build(
@@ -320,25 +321,21 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     # StrainStar symmetry (`strain_sym`) still applies either way: elastic_tensor
     # only evaluates the Laue-irreducible strains and rebuilds the rest by symmetry
     # (the parallel path precomputes all 12; the reduction just uses fewer of them).
-    n_workers = 1 if inp.distributed else (inp.elastic.n_workers or 1)
+    n_workers = resolve_n_workers(inp, inp.elastic)
     if n_workers > 1 and not relaxed_ion:
-        import os
-        import tempfile
+        from gradwave.postscf.seedpool import run_seedpool
 
-        from gradwave.io.checkpoint import save_checkpoint
-        from gradwave.postscf.seedpool import map_spokes
-
-        with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
-            ckpt = os.path.join(td, "ref.ckpt")
-            save_checkpoint(ref, ckpt)
+        def _make_strain_spokes(ckpt: str) -> list[_ElasticSpoke]:
             spokes = []
             for j in range(6):
                 for sgn in (+1, -1):
                     eps = voigt_strain_tensor(j, sgn * h)
                     spokes.append(
                         _ElasticSpoke(inp, cell0, fixed, eps, ckpt, _epskey(eps)))
-            out = map_spokes(_elastic_spoke_worker, spokes,
-                             n_workers=n_workers, verbose=verbose)
+            return spokes
+
+        out = run_seedpool(ref, _make_strain_spokes, _elastic_spoke_worker,
+                           n_workers=n_workers, verbose=verbose)
         stress_map = {key: sigma for key, sigma, _conv in out}
         converged.extend(bool(conv) for _key, _sigma, conv in out)
 

@@ -159,3 +159,38 @@ def map_spokes(
     finally:
         executor.shutdown(wait=True)
     return results
+
+
+def run_seedpool(
+    ref_result: Any,
+    make_spokes: Callable[[str], Iterable[_T]],
+    worker: Callable[[_T], _R],
+    *,
+    n_workers: int | None,
+    verbose: bool = False,
+) -> list[_R]:
+    """Reference-checkpoint SeedPool shell shared by the hub-and-spoke drivers
+    (``api.run_eos`` volumes, ``api.run_elastic`` strains, ``api.run_phonons``
+    displacements).
+
+    Writes ``ref_result``'s converged state to a temp checkpoint, builds the
+    spokes from that checkpoint PATH via ``make_spokes(ckpt)`` (each spoke embeds
+    the path and warm-starts from it inside its worker process), and evaluates
+    them over :func:`map_spokes`. This owns ONLY the tempdir + checkpoint +
+    dispatch shell — every driver's per-task spoke construction and result
+    ASSEMBLY (energy vs stress-by-strain vs force-by-tag) genuinely differ and
+    stay in the driver. Results come back in the order ``make_spokes`` produced
+    the spokes (``map_spokes`` reorders futures back to input order).
+
+    ``save_checkpoint`` is imported lazily so this module keeps its import-cheap,
+    api/SCF-free surface (see the module docstring)."""
+    import os
+    import tempfile
+
+    from gradwave.io.checkpoint import save_checkpoint
+
+    with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
+        ckpt = os.path.join(td, "ref.ckpt")
+        save_checkpoint(ref_result, ckpt)
+        spokes = make_spokes(ckpt)
+        return map_spokes(worker, spokes, n_workers=n_workers, verbose=verbose)
