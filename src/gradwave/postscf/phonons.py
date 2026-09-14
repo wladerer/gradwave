@@ -129,10 +129,16 @@ class HessianSymmetry:
 
 
 def gamma_hessian(res: USPPResult, xc: XCFunctional | SpinXC, *, response_kw=None,
-                  verbose: bool = False) -> np.ndarray:
+                  acoustic_sum_rule: bool = True, verbose: bool = False) -> np.ndarray:
     """(na, 3, na, 3) analytic Γ Hessian [eV/Å²]: irreducible columns via
     hessian_column, symmetry reconstruction, transpose symmetrization and
-    the acoustic sum rule."""
+    the acoustic sum rule.
+
+    ``acoustic_sum_rule`` (default True) subtracts each atom's self-block so
+    Σ_b H[a,i,b,j] = 0 by construction (three exactly-zero Γ acoustic modes).
+    Pass ``acoustic_sum_rule=False`` to get the RAW (pre-enforcement) Hessian —
+    its translational-invariance residual is the reference-free self-consistency
+    diagnostic :func:`postscf.phonons_supercell.asr_residual` gates on."""
     from gradwave.postscf.uspp_position import hessian_column
 
     system = res["system"]
@@ -166,8 +172,9 @@ def gamma_hessian(res: USPPResult, xc: XCFunctional | SpinXC, *, response_kw=Non
     h2 = h_full.reshape(3 * na, 3 * na)
     h2 = 0.5 * (h2 + h2.T)
     hblk = h2.reshape(na, 3, na, 3)
-    for a in range(na):
-        hblk[a, :, a, :] -= hblk[a].sum(axis=1)  # acoustic sum rule
+    if acoustic_sum_rule:
+        for a in range(na):
+            hblk[a, :, a, :] -= hblk[a].sum(axis=1)  # acoustic sum rule
     h2 = hblk.reshape(3 * na, 3 * na)
     return (0.5 * (h2 + h2.T)).reshape(na, 3, na, 3)
 
