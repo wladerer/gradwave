@@ -798,6 +798,19 @@ def scf_noncollinear(
             # eigensolver noise in m_out (mirror the b_xc zeroing above)
             m_out = torch.zeros_like(m_out)
 
+        # charge-conservation guard (mirrors the USPP/PAW raise at
+        # scf/uspp_noncollinear.py): the CHARGE channel Tr ρ = ∫ρ dr must equal
+        # N_electrons. The spinor loop mixes the (ρ, m⃗) 4-vector with the G=0
+        # Kerker pin on the ρ block only, so nothing else asserts the absolute
+        # count. There is no float-charge mode here (spinor bands hold one
+        # electron each, N is fixed). On a converged run ρ is conserved to
+        # ~1e-6 and this passes silently; a fire means real charge
+        # non-conservation in the NC spinor path.
+        n_tot = float(rho_out.sum()) * vol / grid.n_points
+        if abs(n_tot - system.n_electrons) >= 1e-5:
+            raise ValueError(
+                f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
+
         # meta-GGA: rebuild the KE-density matrix (τ_0, τ⃗) from the NEW spinors
         # (consistent with rho_out/m_out) for the energy, and carry it to the
         # next iteration's H. τ rides the orbitals; it is never mixed.

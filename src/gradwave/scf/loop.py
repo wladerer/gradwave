@@ -2605,6 +2605,33 @@ def scf(
                 coeffs_b_s, occ_s, system, bk, grid, vol, nspin,
                 dist_ctx=dist_ctx, collinear_mag=collinear_mag, gamma_gb=gamma_gb)
 
+            # charge-conservation guard (mirrors the USPP/PAW driver's raise at
+            # scf/uspp_loop.py): ∫ρ dr must equal N_electrons. The NC collinear
+            # loop otherwise relies only on the mixer's G=0 pin (check_g0),
+            # which is intentionally disabled under constant-µ (target_mu),
+            # where the total charge is a free variable — so skip the raise
+            # there. On a normally converged run ρ is conserved to ~1e-6 and
+            # this passes silently; a fire means real charge non-conservation.
+            if target_mu is None:
+                n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
+                if abs(n_tot - system.n_electrons) >= 1e-5:
+                    raise ValueError(
+                        f"charge not conserved: {n_tot:.8f} vs "
+                        f"{system.n_electrons}")
+                # spin cross-check (nspin=2): the density magnetization
+                # ∫(ρ↑−ρ↓) must match the occupation moment Σ w(f↑−f↓). A warn,
+                # not a raise (occupation vs density-grid discretization), and
+                # only off the distributed path where occ_s is one k-shard.
+                if nspin == 2 and dist_ctx is None:
+                    mag_dens = (float((rho_out_s[0] - rho_out_s[1]).sum())
+                                * vol / grid.n_points)
+                    mag_occ = float(
+                        (system.kweights[:, None] * (occ_s[0] - occ_s[1])).sum())
+                    if abs(mag_dens - mag_occ) >= 1e-5:
+                        logger.warning(
+                            "magnetization mismatch: density ∫(ρ↑−ρ↓)=%.8f vs "
+                            "occupation Σw(f↑−f↓)=%.8f", mag_dens, mag_occ)
+
             # meta-GGA: rebuild τ_σ from the fresh orbitals — this iteration's energy
             # uses it, and it lags into next iteration's v_τ (like the Fock and DFT+U
             # rebuilds above). No symmetrization: τ is a scalar orbital field that
