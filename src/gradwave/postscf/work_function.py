@@ -13,11 +13,31 @@ absolute potential (≈ 4.44 V, Trasatti; ~0.1 V uncertainty),
 
 E_vac is read as the plane-averaged effective potential in the low-density
 region along the open axis (deep in the vacuum / at the grounded plate, where
-v_xc → 0 so v_eff is the electrostatic potential). This is exact for the ESM
-open-boundary modes (``open_z`` / ``open_z_metal``), where that level is
-box-independent; for a bare periodic slab it is only as good as the vacuum is
-converged. Asymmetric slabs have two different face potentials — see
-``work_function(..., both_faces=True)``.
+v_xc → 0 so v_eff is the electrostatic potential). Under the ESM open-boundary
+modes (``open_z`` / ``open_z_metal``) that level is box-independent: the ESM
+Green's function forces v_H→0 as z→±∞, so a converged slab feels no z-images and
+Φ has no residual dependence on the vacuum thickness Lz. Like any observable,
+though, Φ must be CONVERGED — with respect to **ecut AND vacuum thickness** —
+before that independence shows up. Two convergence caveats bite in practice:
+
+  * ecut. At a crude cutoff the *total energy itself* is box-dependent (an
+    under-converged plane-wave basis samples the box differently as it grows),
+    so Φ inherits that drift. Converge ecut first — once Etot's box-drift is
+    negligible (~0.1 meV/atom), Φ's spurious Lz-dependence collapses with it.
+  * vacuum thickness. Box-independence is exact only where ρ→0 at the open
+    boundary. A too-thin vacuum truncates the density tail and sits on the
+    exponential approach to the plateau; grow the clean vacuum above the slab
+    (≳14 Å is a good starting point) until Φ(Lz) flattens.
+
+At a converged setup Φ(Lz) approaches an exponential plateau (measured decay
+length ≈3 Å): a 16→18 Å window still sits in the tail and looks like a drift,
+but by ~24–28 Å the slope collapses to a few meV/Å — box-independence recovered
+(gated in ``tests/integration/test_work_function_task.py`` ::
+``test_work_function_plateaus_when_converged``). The apparent Lz-drift some
+setups show is therefore a convergence artifact, not an ESM electrostatics bug;
+``esm.py`` is correct. For cross-run comparisons, converge Φ w.r.t. ecut and
+vacuum and report the plateau value (and the Lz used). Asymmetric slabs have two
+different face potentials — see ``work_function(..., both_faces=True)``.
 
 The convention-free reference is the **potential of zero charge** (the neutral
 Fermi level): ``U − U_PZC = Φ − Φ_PZC`` needs no external constant and is what
