@@ -51,7 +51,9 @@ from gradwave.grids import FFTGrid, GSphere
 from gradwave.scf.common import (
     MP_CROSSOVER,
     adaptive_diago_tol,
+    add_esm_energy,
     assemble_pw_energies,
+    assert_charge_conserved,
     convergence_gate,
     hubbard_occ_refresh,
     hubbard_u_ramp_scale,
@@ -68,10 +70,9 @@ from gradwave.scf.common import (
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import (
+    collinear_vtau_fields,
     effective_potentials,
     resolve_atom_moments,
-    vtau_potential,
-    vtau_spin_potential,
 )
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.options import SCFOptions
@@ -439,25 +440,11 @@ def _uspp_vtau_fields(
 ) -> list[torch.Tensor] | None:
     """Per-spin scaled v_τ = ∂e_xc/∂τ̃ grids for the smooth generalized-KS
     operator −½∇·(v_τ∇ψ̃), or None when the functional is not τ-dependent or τ̃
-    is not yet seeded (iteration 1 of a cold start). Mirrors
-    `scf.loop._build_metagga_apply`'s v_τ extraction but on the USPP FULL
-    (smooth + aug) density: v_τ is autograded from the SAME density the smooth
-    v_xc sees, plus the NLCC core fold."""
-    xc, system, grid, nspin = ops.xc, ops.system, ops.grid, ops.nspin
-    if not xc.needs_tau or tau_s is None:
-        return None
-    core = system.rho_core
-    if nspin == 1:
-        assert isinstance(xc, XCFunctional)
-        rho_tot = rho_s[0]
-        rho_for_xc = rho_tot if core is None else rho_tot + core
-        return [vtau_potential(xc, rho_for_xc, tau_s[0], grid)]
-    assert isinstance(xc, SpinXC)
-    cu2 = None if core is None else 0.5 * core
-    r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
-    r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
-    vu, vd = vtau_spin_potential(xc, r_u, r_d, tau_s[0], tau_s[1], grid)
-    return [vu, vd]
+    is not yet seeded (iteration 1 of a cold start). Unpacks the _IterOps and
+    defers to scf.loop.collinear_vtau_fields: v_τ is autograded from the SAME
+    (smooth + aug) density the smooth v_xc sees, plus the NLCC core fold."""
+    return collinear_vtau_fields(ops.xc, rho_s, tau_s, ops.system.rho_core,
+                                 ops.grid)
 
 
 def _build_iter_ops(
@@ -581,9 +568,7 @@ def _assemble_iter_energies(
     hub, e_ewald = ops.hub, ops.e_ewald
     core = system.rho_core
 
-    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-    if abs(n_tot - system.n_electrons) >= 1e-5:
-        raise ValueError(f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
+    assert_charge_conserved(rho_tot_out, system.n_electrons, vol, grid.n_points)
 
     rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
     from gradwave.core.density import sigma_from_rho
@@ -618,14 +603,10 @@ def _assemble_iter_energies(
         e_onec=e_onec,
         e_ewald=e_ewald,
     )
-    from gradwave.core.energies.esm import esm_energy, esm_mode_of
-
-    _esm_mode = esm_mode_of(ops.boundary)
-    if _esm_mode is not None:
-        # ΔE = open-minus-periodic electrostatic correction on the FULL (smooth +
-        # aug) total density — same term the NC loop adds; detached breakdown.
-        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
-                                  grid, mode=_esm_mode, bias=ops.esm_bias)
+    # ΔE = open-minus-periodic ESM correction on the FULL (smooth + aug) total
+    # density — same term the NC loop adds; detached breakdown.
+    add_esm_energy(energies, ops.boundary, rho_tot_out, system.positions,
+                   system.charges, grid, ops.esm_bias)
     return energies
 
 
