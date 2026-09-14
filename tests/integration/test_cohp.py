@@ -129,6 +129,27 @@ def test_cohp_collinear_o2_sum_rule(o2_gamma):
     assert 0.90 < ratio <= 1.001, (c._sumrule_icohp, band_e)
 
 
+@pytest.mark.standard
+def test_cohp_summed_spins_false_is_exact_half(o2_gamma):
+    """summed_spins=False reports the LOBSTER ISPIN=1 per-spin convention, which
+    for a nonmagnetic nspin=1 run is EXACTLY half the physical two-electron value
+    gradwave returns by default (the spin degeneracy g=2 -> 1). The relation must
+    hold on every reported channel — per-pair and total ICOHP and the broadened
+    COHP curves — not just the scalar bond number."""
+    res, _ = o2_gamma
+    full = cohp.cohp(res, width=0.2)
+    half = cohp.cohp(res, width=0.2, summed_spins=False)
+
+    assert half.pair_icohp.keys() == full.pair_icohp.keys()
+    for lab in full.pair_icohp:
+        assert half.pair_icohp[lab] == pytest.approx(0.5 * full.pair_icohp[lab], rel=1e-10)
+        np.testing.assert_allclose(half.pair_cohp[lab], 0.5 * full.pair_cohp[lab], rtol=1e-10)
+    assert half.total_icohp == pytest.approx(0.5 * full.total_icohp, rel=1e-10)
+    np.testing.assert_allclose(half.total, 0.5 * full.total, rtol=1e-10)
+    # the physical sign is unchanged by the convention
+    assert half.pair_icohp["1-2"] < 0.0
+
+
 @pytest.mark.slow
 def test_cohp_soc_bi2():
     """Fully-relativistic Bi2: the j-resolved (SOC) COHP and the scalar-charge
