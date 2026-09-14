@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 from gradwave.constants import E2
-from gradwave.core.gaunt import real_gaunt_table, ylm_np
+from gradwave.core.gaunt import gauss_legendre_sphere, real_gaunt_table, ylm_np
 from gradwave.core.xc.base import xc_eager
 from gradwave.pseudo.radial_torch import simpson_weights
 from gradwave.pseudo.upf_paw import PAWData
@@ -149,16 +149,7 @@ class OneCenter:
         self.ladd = ladd
         nth = (rad_lmax + 2) // 2
         nphi = rad_lmax + 1 + (rad_lmax % 2)
-        from scipy.special import roots_legendre
-
-        z, wz = roots_legendre(nth)
-        phi = np.arange(nphi) * (2.0 * math.pi / nphi)
-        zz, pp = np.meshgrid(z, phi, indexing="ij")
-        st = np.sqrt(1.0 - zz**2)
-        self.dirs = np.stack(
-            [st * np.cos(pp), st * np.sin(pp), zz], axis=-1
-        ).reshape(-1, 3)
-        self.ww = (wz[:, None] * np.full(nphi, 2.0 * math.pi / nphi)).reshape(-1)
+        self.dirs, self.ww = gauss_legendre_sphere(nth, nphi)
         self.nx = len(self.ww)
         self.cos_th = self.dirs[:, 2].copy()
         self.sin_th = np.sqrt(1.0 - self.cos_th**2)
