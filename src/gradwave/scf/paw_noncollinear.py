@@ -81,14 +81,18 @@ def spinor_onsite_becsum(b_up, b_dn, w):
     ``b_up``, ``b_dn`` are (nb, nproj) projections ⟨p_i|ψ_{up,dn}⟩ for one atom's
     projector block; ``w`` is (nb,) occupation weights (kweight·occ). Returns the
     four Hermitian channels [n_ij, mx_ij, my_ij, mz_ij], each (nproj, nproj) complex,
-    with n = ρ↑↑+ρ↓↓, mz = ρ↑↑−ρ↓↓, mx = ρ↑↓+ρ↓↑, my = i(ρ↑↓−ρ↓↑). Mirrors the grid
-    Pauli decomposition in ``scf/noncollinear.py`` but on projector indices; feeds
-    ``e1c_nc_t`` / ``onsite_nc_energy_and_ddd``."""
+    with n = ρ↑↑+ρ↓↓, mz = ρ↑↑−ρ↓↓, mx = ρ↑↓+ρ↓↑, my = i(ρ↓↑−ρ↑↓) = ψ†σ_yψ. This
+    matches the grid Pauli decomposition's my = +2·Im(ρ↑↓) (``spinor_common.
+    pauli_density_accumulate``, ``m_out[1] += 2·ud.imag``) and the H's D↑↓ = D_x−i·D_y
+    assembly; the projector-space my must carry the SAME sign as the grid my or the
+    augmentation B_y opposes the smooth B_y and breaks grad_c E == H c off-
+    stationarity (see tests/unit/test_energy_hamiltonian_consistency.py's spinor-NC
+    gate). Feeds ``e1c_nc_t`` / ``onsite_nc_energy_and_ddd``."""
     r_uu = torch.einsum("b,bi,bj->ij", w, b_up.conj(), b_up)
     r_dd = torch.einsum("b,bi,bj->ij", w, b_dn.conj(), b_dn)
     r_ud = torch.einsum("b,bi,bj->ij", w, b_up.conj(), b_dn)
     r_du = torch.einsum("b,bi,bj->ij", w, b_dn.conj(), b_up)
-    chans = (r_uu + r_dd, r_ud + r_du, 1j * (r_ud - r_du), r_uu - r_dd)
+    chans = (r_uu + r_dd, r_ud + r_du, 1j * (r_du - r_ud), r_uu - r_dd)
     return [0.5 * (x + x.conj().transpose(-1, -2)) for x in chans]   # Hermitize
 
 

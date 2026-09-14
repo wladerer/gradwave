@@ -676,69 +676,42 @@ def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, aug_channels=(0, 1, 2, 3),
 
 _SPINOR_NC_OCC = [1.0, 1.0, 0.9, 0.6, 0.3, 0.1]
 
-# The four-channel gate localizes a REAL sign bug in the m_y augmentation
-# coupling of the noncollinear USPP/PAW path (invisible to every existing
-# test — see the xfail below). Per-channel measured off-stationarity gap
-# (rrkjus, rattled P1, random tilted spinor):
-#     aug off              4.3e-16   (== the norm-conserving spinor identity)
-#     n only               5.7e-15
-#     n + m_z              6.0e-15   (the collinear-limit regime)
-#     n + m_x              4.9e-15
-#     n + m_x + m_z        6.6e-15
-#     n + m_y              1.2e-03   <-- breaks
-#     all four channels    1.2e-03
-# so the machine-precision gate below runs over the CORRECT subset
-# (n, m_x, m_z) and the full set is a strict xfail pinned to the m_y bug.
-_SPINOR_NC_GOOD_CHANNELS = (0, 1, 3)   # n, m_x, m_z — the correct channels
-
-_MY_SIGN_BUG = (
-    "REAL BUG (audit finding #1): the m_y channel of the noncollinear "
-    "USPP/PAW path is off by a sign. scf.paw_noncollinear.spinor_onsite_becsum "
-    "builds m_y = 1j*(r_ud - r_du) = -2 Im(b↑*b↓), the OPPOSITE sign to the "
-    "grid Pauli convention m_y = 2 Im(ψ↑*ψ↓) used by "
-    "spinor_common.pauli_density_accumulate and core.xc.noncollinear.vxc_and_bxc "
-    "(consistent with the H's D↑↓ = D_x - i·D_y assembly in "
-    "uspp_noncollinear.SpinorBatchedHS). So every use of the projector-space "
-    "m_y — the m⃗_aug augmentation charge AND the PAW one-center ddd_my — routes "
-    "through that 2×2 D assembly with a flipped sign, and grad_c E != H c "
-    "off-stationarity by ~1.2e-3 (bare USPP) / present in PAW too. Invisible to "
-    "the existing suite because its only noncollinear tests seed moments ∥ẑ and "
-    "∥x̂ (both m_y = 0). Flipping the m_y sign in spinor_onsite_becsum collapses "
-    "BOTH the rrkjus and kjpaw four-channel gaps to ~6e-15 (verified) — one "
-    "root cause. NOT fixed here: reported for review (do not fix physics "
-    "silently). Remove these xfails when the sign is corrected."
-)
+# This four-channel gate CAUGHT a real sign bug in the m_y augmentation coupling
+# of the noncollinear USPP/PAW path — invisible to every prior test, which seed
+# moments ∥ẑ and ∥x̂ (both m_y = 0) where first-order errors also vanish at self-
+# consistency (the O₂-vs-Si symmetric-cancellation trap). Per-channel measured
+# off-stationarity gap (rrkjus, rattled P1, random tilted spinor) BEFORE the fix:
+#     aug off / n / n+m_z / n+m_x / n+m_x+m_z    4.3e-16 … 6.6e-15   (all fine)
+#     n + m_y   /   all four channels            1.2e-03             <-- broke
+# Root cause: spinor_onsite_becsum built m_y = 1j*(r_ud - r_du) = -2 Im(b↑*b↓),
+# the OPPOSITE sign to the grid Pauli m_y = +2 Im(ρ↑↓) (spinor_common.
+# pauli_density_accumulate, consistent with the H's D↑↓ = D_x - i·D_y assembly),
+# so the m⃗_aug augmentation charge AND the PAW one-center ddd_my both routed the
+# projector-space m_y through the 2×2 D with a flipped sign. FIXED in
+# scf/paw_noncollinear.spinor_onsite_becsum (m_y = 1j*(r_du - r_ud)); all four
+# channels now collapse to ~6e-15 for BOTH rrkjus and kjpaw. These tests guard the
+# fix — a regression reintroduces the 1.2e-3 gap.
+_SPINOR_NC_ALL_CHANNELS = (0, 1, 2, 3)   # n, m_x, m_y, m_z
 
 
 def test_grad_energy_equals_hamiltonian_uspp_spinor_nc():
-    """Bare USPP (rrkjus), noncollinear — the machine-precision gate over the
-    CORRECT Pauli channels (n, m_x, m_z): the spinor Q̃ augmentation chain, the
-    ∫(v_eff, B⃗) Q screening of the 2×2 D, and the full local v·1 + B⃗·σ⃗
-    exchange-field apply, against autograd of the assembled energy on a rattled
-    P1 cell with a tilted m⃗. m_y is excluded here (it is a strict xfail below
-    — a real sign bug); no PAW one-center in the rrkjus path, so this isolates
-    the augmentation/exchange-field coupling."""
+    """Bare USPP (rrkjus), noncollinear — machine-precision gate over ALL four
+    Pauli channels (n, m_x, m_y, m_z): the spinor Q̃ augmentation chain, the
+    ∫(v_eff, B⃗) Q screening of the 2×2 D, and the full local v·1 + B⃗·σ⃗ exchange-
+    field apply, against autograd of the assembled energy on a rattled P1 cell
+    with a tilted m⃗. The m_y channel guards the sign bug this gate found (comment
+    above); no PAW one-center in the rrkjus path, so this isolates the
+    augmentation/exchange-field coupling."""
     assert _eh_gap_uspp_spinor_nc(
         "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
-        aug_channels=_SPINOR_NC_GOOD_CHANNELS) < 1e-10
+        aug_channels=_SPINOR_NC_ALL_CHANNELS) < 1e-10
 
 
-@pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
-def test_grad_energy_equals_hamiltonian_uspp_spinor_nc_all_channels():
-    """FULL four-channel augmentation (rrkjus): exposes the m_y sign bug — the
-    off-stationarity gap is ~1.2e-3, not <1e-10. Strict xfail; flips to a
-    failure (prompting removal) once the m_y sign is corrected."""
-    assert _eh_gap_uspp_spinor_nc(
-        "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
-        aug_channels=(0, 1, 2, 3)) < 1e-10
-
-
-@pytest.mark.xfail(strict=True, reason=_MY_SIGN_BUG)
 def test_grad_energy_equals_hamiltonian_paw_spinor_nc_all_channels():
-    """FULL four-channel augmentation (kjpaw): the same m_y sign bug, now also
-    reaching the PAW 2×2 one-center ddd_my (both the augmentation and the
-    one-center route the projector-space m_y through the D↑↓ = D_x − i·D_y
-    assembly). Strict xfail — the corrected m_y sign closes this to ~6e-15."""
+    """FULL four-channel augmentation (kjpaw): the same coupling, now also through
+    the PAW 2×2 one-center ddd_my (the augmentation and the one-center both route
+    the projector-space m_y through D↑↓ = D_x − i·D_y). Guards the m_y sign fix on
+    the PAW path — collapses to ~6e-15 with the corrected sign."""
     assert _eh_gap_uspp_spinor_nc(
         "Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
         aug_channels=(0, 1, 2, 3)) < 1e-10
