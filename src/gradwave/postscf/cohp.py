@@ -700,7 +700,8 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
          rcut: float = 3.0, width: float = 0.1, npoints: int = 800,
          window: tuple[float, float] | None = None, method: str = "operator",
          resolve_images: bool = False, basis: str = "pswfc",
-         summed_spins: bool = True, paw_reconstruct: bool = True) -> COHP:
+         summed_spins: bool = True,
+         paw_reconstruct: bool | str = True) -> COHP:
     """Atom-pair COHP of a converged collinear SCF (norm-conserving, nspin 1/2).
 
     `pairs` selects atom index tuples (0-based); the default is every atom pair
@@ -715,15 +716,34 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     implemented for nspin=1 (the nonmagnetic case LOBSTER's convention describes)
     and raises NotImplementedError for nspin=2.
 
-    `paw_reconstruct` (default True) is a no-op for a norm-conserving SCFResult; for
-    a PAW USPPResult it replaces the smooth AO projection <chi_p|psi~> with the
-    all-electron-reconstructed one <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i}
-    <beta_i|psi~>, where <beta_i|psi~> is the stored becp and W the AE-minus-PS
-    partial-wave overlap (see `_paw_ae_augment_matrix`). This restores the
-    all-electron wavefunction inside the augmentation spheres, correcting the
-    covalent-biased ICOHP a pure pseudo projection gives against a PAW/all-electron
-    LOBSTER reference. Only the becp is augmented; the AO overlap metric is
-    unchanged. Bare (non-PAW) ultrasoft species get no augmentation.
+    `paw_reconstruct` augments the AO projection inside the PAW augmentation
+    spheres (a no-op for a norm-conserving SCFResult, and for bare ultrasoft
+    species with no one-center data). The becp is modified; the AO overlap metric
+    is unchanged. Modes:
+      True / "ae" (default): candidate A, the textbook all-electron reconstruction
+        <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>, W the
+        AE-minus-PS partial-wave overlap (`_paw_ae_augment_matrix`).
+      "smetric": candidate B, the S-metric (norm-restoring) augmentation
+        <chi_p|S|psi~> = <chi_p|psi~> + sum_ij <chi_p|beta_i> q_ij <beta_j|psi~>,
+        mirroring pdos._lowdin_weights_uspp.
+      False: no augmentation (the smooth pseudo projection).
+
+    MEASURED against per-bond LOBSTER (per-spin ISPIN=1 convention,
+    summed_spins=False, resolve_images=True, PAW psl pseudos): the two candidates
+    BRACKET the oracle, A below and B above, on both systems tested, and NEITHER
+    cleanly lands on it:
+
+        system   smooth   A ("ae")   B ("smetric")   LOBSTER
+        C        -9.43    -8.69      -10.96           -9.586
+        Si       -5.77    -3.68      -4.78            -4.495
+
+    So candidate A (the default, physically rigorous) systematically OVERshoots
+    (lands ~9-18% below the oracle magnitude); B is closer on Si but overshoots
+    the other way on C; the smooth projection happens to sit near the oracle for
+    C and 28% over for Si. The residual is bracketed, not closed — LOBSTER's own
+    number is itself a basis/projection-dependent approximation, not the exact AE
+    value A targets. Treat the absolute per-bond magnitude as bracketed within
+    A..B, not exact.
 
     `method` selects the AO Hamiltonian: "operator" (default) evaluates
     H~ = <phi~|H^|phi~> with the converged Kohn-Sham operator (energy-zero
@@ -773,18 +793,32 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     # summed_spins=False -> per-spin (g=1): exactly half the nspin=1 physical value
     g_spin = (2.0 if nspin == 1 else 1.0) if summed_spins else 1.0
 
-    # PAW all-electron reconstruction of the AO projection (candidate A). No-op
-    # for a norm-conserving SCFResult (no becps) and for bare ultrasoft species.
+    # PAW augmentation of the AO projection. No-op for a norm-conserving
+    # SCFResult (no becps) and for a system with no PAW one-center data.
+    recon_mode: str | None = None
     w_augment = None
+    q_full = None
     becps = None
     if paw_reconstruct and isinstance(res, USPPResult) and basis == "pswfc":
         assert isinstance(system, USPPSystem)
-        w_augment = _paw_ae_augment_matrix(system, cols, device)
-        if bool(torch.count_nonzero(w_augment)):
-            w_augment = w_augment.to(CDTYPE)
-            becps = res.becps
+        if paw_reconstruct is True or paw_reconstruct == "ae":
+            recon_mode = "ae"
+        elif paw_reconstruct in ("smetric", "s"):
+            recon_mode = "smetric"
         else:
-            w_augment = None  # no PAW one-center data -> nothing to add
+            raise ValueError(
+                f"paw_reconstruct must be True/'ae', 'smetric', or False, "
+                f"got {paw_reconstruct!r}")
+        has_paw = any(getattr(system.paws[sp], "is_paw", False)
+                      for sp in set(system.species_of_atom))
+        if not has_paw:
+            recon_mode = None  # no one-center data -> nothing to augment
+        elif recon_mode == "ae":
+            w_augment = _paw_ae_augment_matrix(system, cols, device).to(CDTYPE)
+            becps = res.becps
+        else:  # smetric
+            q_full = system.q_full.to(device).to(CDTYPE)
+            becps = res.becps
 
     # actual occupations normalized to [0, 1] per state (in [0,2] for nspin=1)
     occ_all = res.occupations
@@ -812,15 +846,24 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
                 q = _iao_projectors_k(q, c[occ_mask])            # occupied-span IAOs
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
             becp = torch.einsum("bg,pg->bp", c, q.conj())        # <chi_p|psi~>
-            if w_augment is not None:
-                # <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>.
-                # becps is assigned iff w_augment is (both under the PAW branch).
-                assert becps is not None
+            if recon_mode is not None:
+                assert becps is not None  # assigned with recon_mode in the PAW branch
                 beta_psi = (
                     cast("list[torch.Tensor]", becps)[ik] if nspin == 1
                     else cast("list[list[torch.Tensor]]", becps)[isp][ik]
-                ).to(device)
-                becp = becp + torch.einsum("pi,bi->bp", w_augment, beta_psi.to(CDTYPE))
+                ).to(device).to(CDTYPE)
+                if recon_mode == "ae":
+                    # <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>
+                    assert w_augment is not None
+                    becp = becp + torch.einsum("pi,bi->bp", w_augment, beta_psi)
+                else:  # smetric: <chi|S|psi~> = becp + sum_ij <chi|beta_i> q_ij <beta_j|psi~>
+                    from gradwave.core.hamiltonian import projectors
+                    assert q_full is not None
+                    assert isinstance(system, USPPSystem)
+                    pbeta = projectors(system.proj_data[ik], system.positions).to(device)
+                    phi_beta = torch.einsum("pg,ig->pi", q.conj(), pbeta)  # <chi_p|beta_i>
+                    pq = phi_beta @ q_full                                 # (nproj_ao, nproj_becp)
+                    becp = becp + torch.einsum("pj,bj->bp", pq, beta_psi)
             proj = _lowdin_project(becp, overlap)                # (nb, nproj)
             if use_op:
                 from gradwave.core.hamiltonian import HamiltonianK, projectors
