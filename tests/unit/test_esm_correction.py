@@ -286,12 +286,12 @@ def _g0_vacuum_field(az, n_open):
     dz = az / n_open
     zc = np.arange(n_open) * dz
     c = 0.5 * az
-    # symmetric neutral z-profile: +2q core minus two q flanks (Σρ dz = 0)
-    w = 1.2
+    # localized symmetric neutral z-profile: +2q core minus two q flanks (Σρ dz=0)
+    w = 0.9
     prof = (2.0 * np.exp(-((zc - c) ** 2) / (2 * w * w))
-            - np.exp(-((zc - c - 2.5) ** 2) / (2 * w * w))
-            - np.exp(-((zc - c + 2.5) ** 2) / (2 * w * w)))
-    prof = prof - prof.mean()  # exact neutrality on the grid
+            - np.exp(-((zc - c - 2.0) ** 2) / (2 * w * w))
+            - np.exp(-((zc - c + 2.0) ** 2) / (2 * w * w)))
+    prof = 0.05 * (prof - prof.mean())  # exact neutrality on the grid
     rho = torch.zeros((20, 20, n_open), dtype=torch.float64)
     rho[:, :] = torch.as_tensor(prof, dtype=torch.float64)
     v_open = (hartree_potential_r(rho, grid.g2)
@@ -301,8 +301,9 @@ def _g0_vacuum_field(az, n_open):
         A = np.vstack([zc[mask], np.ones(mask.sum())]).T
         return np.linalg.lstsq(A, v_open[mask], rcond=None)[0][0] * 1000.0
 
-    lo = (zc >= 1.0) & (zc <= c - 4.0)
-    hi = (zc >= c + 4.0) & (zc <= az - 1.0)
+    # DEEP vacuum only (density negligible beyond ~5 Å from the slab center)
+    lo = (zc >= 2.0) & (zc <= c - 8.0)
+    hi = (zc >= c + 8.0) & (zc <= az - 2.0)
     return slope(lo), slope(hi)
 
 
@@ -312,11 +313,11 @@ def test_g0_reference_no_residual_vacuum_field():
     The old real-space wrapped-kernel G∥=0 reference (which did NOT match the
     spectral periodic Hartree the SCF adds back) left a same-sign field that grew
     with vacuum thickness."""
-    lo1, hi1 = _g0_vacuum_field(24.0, 160)
-    lo2, hi2 = _g0_vacuum_field(30.0, 200)  # same dz=0.15
+    lo1, hi1 = _g0_vacuum_field(28.0, 187)
+    lo2, hi2 = _g0_vacuum_field(34.0, 227)  # ~same dz≈0.15
     for s in (lo1, hi1, lo2, hi2):
-        assert abs(s) < 3.0, ("residual G∥=0 vacuum field", lo1, hi1, lo2, hi2)
-    assert abs(lo2 - lo1) < 2.0 and abs(hi2 - hi1) < 2.0, (lo1, hi1, lo2, hi2)
+        assert abs(s) < 0.5, ("residual G∥=0 vacuum field", lo1, hi1, lo2, hi2)
+    assert abs(lo2 - lo1) < 0.5 and abs(hi2 - hi1) < 0.5, (lo1, hi1, lo2, hi2)
 
 
 def test_input_rejects_bad_boundary():
