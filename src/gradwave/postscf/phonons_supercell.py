@@ -117,6 +117,24 @@ def symmetrize_force_constants(phi_home: np.ndarray,
     return out
 
 
+def asr_residual(phi_home: np.ndarray) -> float:
+    """Raw acoustic-sum-rule residual max_{μ,i,j} |Σ_s Φ[μ,i,s,j]| [eV/Å²].
+
+    Translational invariance of the RAW force constants: a rigid translation of
+    every atom exerts no net force, so Σ_s Φ[μ,i,s,j] = 0 exactly for the true
+    Hessian. Evaluated on the force constants BEFORE `apply_acoustic_sum_rule`
+    (or before the equivalent self-block subtraction in
+    `postscf.phonons.gamma_hessian` / `postscf.hessian.force_constants_gamma`),
+    this is a convention-free, reference-free self-consistency diagnostic — the
+    phonon analogue of `postscf.born.born_effective_charges`'s `asr_max`. A large
+    value flags a Hessian that violates translational invariance even though the
+    post-enforcement acoustic modes are ~0 by construction. `phi_home` is
+    (N_prim, 3, N_sc, 3) or any (na, 3, nb, 3) block form (the sum runs over the
+    third axis — every neighbour column)."""
+    phi = np.asarray(phi_home, dtype=float)
+    return float(np.abs(phi.sum(axis=2)).max())
+
+
 def apply_acoustic_sum_rule(phi_home: np.ndarray) -> np.ndarray:
     """Enforce Σ_{s} Φ_home[μ,i,s,j] = 0 by correcting each μ's self block
     (the R=0, ν=μ term at site μ). Guarantees three exactly-zero acoustic modes
