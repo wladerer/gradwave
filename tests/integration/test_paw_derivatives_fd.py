@@ -43,7 +43,8 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
 # Rattled 2-atom Si kjpaw cell (off the ideal site so every force/stress
 # component is genuinely nonzero); coarse ecut/k — the derivative identities
-# hold at any basis/grid, so this stays a fast standard-tier check.
+# hold at any basis/grid. Slow tier: the force oracle needs 7 tightly-converged
+# (etol 1e-11) USPP/PAW SCFs, like the r2SCAN/+U FD analogues.
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 SI_POS = np.array([[0.0, 0.0, 0.0], [1.42, 1.30, 1.38]])
 
@@ -52,7 +53,7 @@ def _paw():
     return parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
 
 
-@pytest.mark.standard
+@pytest.mark.slow
 def test_paw_forces_match_fd_energy():
     """Base PBE PAW forces vs central FD of the re-converged SCF total energy,
     all 3 Cartesian components of the displaced atom."""
@@ -88,7 +89,7 @@ def test_paw_forces_match_fd_energy():
     print(f"\nmax |analytic − FD| PAW force = {worst:.2e} eV/Å")
 
 
-@pytest.mark.standard
+@pytest.mark.slow
 def test_paw_stress_match_fd_energy():
     """Base PBE PAW stress vs central FD of the frozen-basis strained energy
     (the convention-free σ = (1/Ω) dE/dε oracle), a spread of components."""
