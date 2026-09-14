@@ -112,6 +112,7 @@ from gradwave.postscf.kgeometry import (
     OverlapVelocity,
     VelocityApply,
     _eigh_and_dh,
+    _k_cart,
     _overlap_kbprojectors,
     _toeplitz_index,
 )
@@ -1560,12 +1561,7 @@ class BlochHKS:
         )
 
     def k_cart(self, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
-        kf = (
-            k_frac.to(RDTYPE)
-            if isinstance(k_frac, Tensor)
-            else torch.as_tensor(np.asarray(k_frac, dtype=float), dtype=RDTYPE)
-        )
-        return kf @ self.b
+        return _k_cart(self.b, k_frac)
 
     def h(self, k_cart: Tensor) -> Tensor:
         """Dense Hermitian H(k) (npw, npw) [eV], differentiable in Cartesian k."""

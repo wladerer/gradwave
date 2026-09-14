@@ -47,19 +47,19 @@ from gradwave.core.hubbard import (
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._response import (
+    _k_hxc_spin,
+    fxc_hvp,
+    hartree_kernel,
+    insulator_window,
+    sternheimer_shift,
+)
 
 # The batched Sternheimer CG and the coefficient padding moved to
 # postscf._response under public names; the private aliases stay importable
 # from here for existing callers (postscf.dielectric, postscf.forces, ...).
 from gradwave.postscf._response import (
     cg_sternheimer as _cg_sternheimer_b,
-)
-from gradwave.postscf._response import (
-    fxc_hvp,
-    fxc_hvp_spin,
-    hartree_kernel,
-    insulator_window,
-    sternheimer_shift,
 )
 from gradwave.postscf._response import (
     pad_coeffs as _pad,
@@ -274,24 +274,6 @@ def _assemble_u_matrix(chi_mat: torch.Tensor, chi0_mat: torch.Tensor,
             "chi_col": chi_mat[:, site].tolist(),
             "chi0_col": chi0_mat[:, site].tolist(),
             "chi_mat": chi_mat.tolist(), "chi0_mat": chi0_mat.tolist()}
-
-
-def _k_hxc_spin(
-    res: SCFResult, xc: SpinXC, dru: torch.Tensor, drd: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on Δρ_tot (G=0 excluded)
-    plus f_xc^{σσ'} as an autograd HVP of E_xc at the SCF density (NLCC core
-    split half/half per channel, exactly as the SCF potential was built).
-    Both kernels are the shared postscf._response primitives."""
-    core = res.system.rho_core
-    cu2 = 0.0 if core is None else 0.5 * core
-    kh = hartree_kernel(res.system.grid, dru + drd)
-    # _k_hxc_spin is only ever called from _k_hxc_channels's `nspin == 2`
-    # branch, and the NC SCF always sets rho_spin then (see results.py).
-    assert res.rho_spin is not None
-    fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
-                          res.system.grid, dru, drd)
-    return kh + fu, kh + fd
 
 
 def _k_hxc_channels(

@@ -124,10 +124,21 @@ def _beta_channels(
 
 def _toeplitz_index(miller: Tensor, shape: tuple[int, int, int]) -> Tensor:
     """(npw, npw) flat FFT-box index of G_i − G_j (the dense local-term gather)."""
-    n1, n2, n3 = shape
-    nbox = torch.tensor((n1, n2, n3), device=miller.device)
-    diff = (miller[:, None, :] - miller[None, :, :]) % nbox
-    return diff[..., 0] * (n2 * n3) + diff[..., 1] * n3 + diff[..., 2]
+    from gradwave.core.batch import _toeplitz_diff_index
+
+    return _toeplitz_diff_index(miller, shape)
+
+
+def _k_cart(b: Tensor, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
+    """Cartesian k [Å⁻¹] = k_frac @ b from fractional coordinates, coercing a
+    Sequence/ndarray input to a tensor and staying on the graph for a Tensor
+    input. Shared by the k-geometry, SOC, and NMR builders."""
+    kf = (
+        k_frac.to(RDTYPE)
+        if isinstance(k_frac, Tensor)
+        else torch.as_tensor(np.asarray(k_frac, dtype=float), dtype=RDTYPE)
+    )
+    return kf @ b
 
 
 @dataclass(frozen=True)
@@ -330,12 +341,7 @@ class BlochHK:
 
     def k_cart(self, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
         """Cartesian k [Å⁻¹] from fractional coordinates (stays on the graph)."""
-        kf = (
-            k_frac.to(RDTYPE)
-            if isinstance(k_frac, Tensor)
-            else torch.as_tensor(np.asarray(k_frac, dtype=float), dtype=RDTYPE)
-        )
-        return kf @ self.b
+        return _k_cart(self.b, k_frac)
 
     def projectors(self, k_cart: Tensor) -> Tensor:
         """KB projectors p (nproj_tot, npw) at continuous k, differentiable in k."""
@@ -724,6 +730,7 @@ def _sternheimer_ctvr(
     """
     from gradwave.core.batch import BatchedHamiltonian, projectors_b
     from gradwave.postscf._response import (
+        _p_c,
         cg_sternheimer,
         insulator_window,
         pad_coeffs,
@@ -757,8 +764,7 @@ def _sternheimer_ctvr(
     )
 
     def p_c(x: Tensor) -> Tensor:
-        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+        return _p_c(c_occ, x)
 
     v = VelocityApply(system)
     dpsi = []

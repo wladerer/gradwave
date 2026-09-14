@@ -163,14 +163,12 @@ class HamiltonianK:
         M = self._toep_M_cache.get(cdtype)
         if M is None:
             if self._toep_idx is None:
-                shape = self.shape
-                s1s2, s2 = shape[1] * shape[2], shape[2]
+                # lazy: batch imports this module at load time
+                from gradwave.core.batch import _miller_from_flat, _toeplitz_diff_index
+
                 flat = self.sphere.flat_idx.to(torch.long)
-                rem = flat % s1s2
-                g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (npw,3)
-                n = torch.tensor(shape, device=flat.device)
-                diff = (g[:, None, :] - g[None, :, :]) % n
-                self._toep_idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+                miller = _miller_from_flat(flat, self.shape)  # (npw, 3)
+                self._toep_idx = _toeplitz_diff_index(miller, self.shape)
             vhat = r_to_g(self.v_eff_r.to(cdtype)).reshape(-1)
             M = vhat[self._toep_idx]
             self._toep_M_cache[cdtype] = M

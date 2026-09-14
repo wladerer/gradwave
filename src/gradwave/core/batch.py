@@ -149,6 +149,31 @@ _TOEP_TRIAL_MARGIN = 0.7
 _HAPPLY_TALLY = {"on": False, "count": 0}
 
 
+def _miller_from_flat(
+    flat: torch.Tensor, shape: tuple[int, int, int]
+) -> torch.Tensor:
+    """Recover the Miller triple(s) ``(..., 3)`` of each plane wave from its
+    box-flat FFT index ``(...,)`` for an FFT box of ``shape`` (n1, n2, n3);
+    the inverse of the row-major flatten g1·(n2·n3) + g2·n3 + g3."""
+    s1s2, s2 = shape[1] * shape[2], shape[2]
+    rem = flat % s1s2
+    return torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)
+
+
+def _toeplitz_diff_index(
+    miller: torch.Tensor, shape: tuple[int, int, int]
+) -> torch.Tensor:
+    """Box-flat index of the box-wrapped pairwise difference G_i − G_j from
+    Miller triples ``miller`` ``(..., npw, 3)``, returning ``(..., npw, npw)``.
+    The single index construction behind the local-potential Toeplitz matrix,
+    shared by the single-k, nk-batched, and k-chunked builds (each caller keeps
+    its own batching wrapper)."""
+    s1s2, s2 = shape[1] * shape[2], shape[2]
+    n = torch.tensor(shape, device=miller.device)
+    diff = (miller[..., :, None, :] - miller[..., None, :, :]) % n
+    return diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+
+
 def reset_happly_tally() -> None:
     """Zero and enable the band·k H-application counter (see
     ``BatchedHamiltonian.apply``)."""
@@ -386,15 +411,9 @@ class BatchedHamiltonian:
         and re-flattens. Padded slots reuse their raw box index; their M entries
         are harmless (the input is masked before the contraction and the output
         rows are masked after)."""
-        shape = self.shape
-        s1s2, s2 = shape[1] * shape[2], shape[2]
         flat = self.gather_idx.to(torch.long)  # (nk, npw) box → sphere
-        g0 = flat // s1s2
-        rem = flat % s1s2
-        g = torch.stack([g0, rem // s2, rem % s2], dim=-1)  # (nk, npw, 3) Miller
-        n = torch.tensor(shape, device=flat.device)
-        diff = (g[:, :, None, :] - g[:, None, :, :]) % n  # (nk, npw, npw, 3)
-        return diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+        miller = _miller_from_flat(flat, self.shape)  # (nk, npw, 3)
+        return _toeplitz_diff_index(miller, self.shape)  # (nk, npw, npw)
 
     def _toeplitz_idx(self) -> torch.Tensor:
         """The (nk, npw, npw) difference-index table, cached on the BatchedK.
