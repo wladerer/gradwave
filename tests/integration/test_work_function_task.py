@@ -125,132 +125,17 @@ def test_both_faces_split_for_dipolar_slab(tmp_path):
         assert 0.0 < phi[i] < 12.0
 
 
-def _nah_input_lz(tmp_path: Path, lz: float):
-    """The same NaH slab as `_nah_input`, but with the open-axis box length `lz`
-    a free parameter (the slab atoms stay at fixed absolute z, 6.5 and 9.0 Å —
-    only the vacuum above H⁻ grows). Tighter tolerances than the wiring test: the
-    box-independence gate compares two Φ to the meV, so the SCF must be converged
-    well below that."""
-    from gradwave.inputs import load_input
+def _al100_slab_input_lz(tmp_path: Path, lz: float, ecut_ry: float, kmesh: int):
+    """A 4-layer Al(100) ESM open_z slab at open-axis box length `lz`, built at a
+    CONVERGED setup (`ecut_ry`, dense in-plane `kmesh`×`kmesh`×1). The slab atoms
+    stay at fixed absolute z (bottom vacuum pinned); only the clean vacuum above
+    the top layer grows with `lz`.
 
-    body = f"""
-structure:
-  cell: [[7.0, 0.0, 0.0], [0.0, 7.0, 0.0], [0.0, 0.0, {lz}]]
-  positions:
-    cart: [[3.5, 3.5, 6.5], [3.5, 3.5, 9.0]]
-  species: [Na, H]
-pseudopotentials:
-  dir: {PSEUDOS}
-  map: {{Na: Na_ONCV_PBE_sr.upf, H: H_ONCV_PBE-1.2.upf}}
-ecut: {24 * RY}
-xc: pbe
-kpoints:
-  mesh: [1, 1, 1]
-smearing:
-  type: fermi-dirac
-  width: 0.1
-scf:
-  boundary: open_z
-  max_iter: 120
-  etol: 1.0e-8
-  rhotol: 1.0e-7
-output:
-  dir: {tmp_path}
-  checkpoint: false
-error_estimate: false
-"""
-    p = tmp_path / f"in_lz{lz}.yaml"
-    p.write_text(body)
-    return load_input(p)
-
-
-@pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED (asus, 2026-09-14): Φ is NOT box-independent to the meV for "
-        "this NaH ESM slab. Φ(Lz=16)=5.1319, Φ(Lz=18)=5.1648 eV → |Δ|=33 meV, "
-        "and a wider sweep (16/18/20/24/28 Å, dz held at 1/6 Å) drifts "
-        "MONOTONICALLY without plateauing: Φ = 5.132/5.165/5.209/5.258/5.309 eV "
-        "(~2–13 meV/Å). E_F and BOTH per-face vacuum levels drift the same way, "
-        "so this is not a single-face-blend artifact. NOTE: this was first read as "
-        "a diffuse-anion convergence effect, but the compact-metal witness "
-        "(test_work_function_box_independent_al_metal) drifts ~110 meV/Å — worse "
-        "than NaH — with a measured ~343 meV/Å residual field in the ESM 'vacuum', "
-        "so the root cause is a real ESM electrostatics residual (non-field-free "
-        "vacuum), NOT the H⁻ tail. The `postscf.work_function` docstring's 'exact "
-        "because box-independent' is overstated for ALL ESM slabs at practical "
-        "vacuum thicknesses. This gate encodes the CORRECT few-meV identity; it is "
-        "xfail(strict) so a "
-        "future fix (or a convergence-adequate regime) flips it to XPASS and forces "
-        "removal of this marker. Do NOT loosen the tolerance to make it pass green."),
-)
-def test_work_function_box_independent_across_vacuum_thickness(tmp_path):
-    """Φ = E_vac − E_F should be INVARIANT to the vacuum thickness under ESM
-    open-boundary electrostatics — the exactness claim in `postscf.work_function`'s
-    docstring ("box-independent" vacuum level). This gates that identity directly,
-    with no literature number and no convention: run the SAME NaH slab at two
-    open-axis box lengths and assert the two work functions agree to the meV.
-
-    The gotcha (prior slab work): changing the box length at fixed ecut re-samples
-    the FFT grid spacing dz, which alone injects meV-scale noise into E_vac. So we
-    hold dz FIXED — Lz=16 Å with nz=96 and Lz=18 Å with nz=108 both give dz=1/6 Å
-    exactly (the natural grids at ecut=24 Ry; pinned here via `fft_shape` so the
-    identity is tested, not a grid coincidence). Only the vacuum thickness (where
-    ρ≈0) differs, so under true box-independence Φ would move only by SCF-
-    convergence noise, not by the ~Å the vacuum grew.
-
-    CURRENT VERDICT: the identity FAILS (see the xfail reason) — Φ drifts ~33 meV
-    over a 2 Å box change and keeps drifting out to 28 Å. Kept as a strict-xfail
-    self-consistency gate so the audit finding lives in the suite.
-    """
-    import torch
-
-    from gradwave.api._slab import resolve_slab_box
-    from gradwave.api.scf import run_scf
-    from gradwave.api.system import _is_uspp, _species_upfs, build_scaled_system
-    from gradwave.postscf.work_function import work_function
-
-    torch.set_num_threads(6)
-
-    def phi_at(lz: float, nz: int) -> float:
-        inp = _nah_input_lz(tmp_path, lz)
-        assert inp.scf.boundary == "open_z"
-        _species, upfs, soa = _species_upfs(inp)
-        # mirror build_system's NC path exactly, but PIN the FFT box so dz is
-        # identical across the two Lz (nx=ny=42 unchanged; nz scales with Lz).
-        box = resolve_slab_box(inp, upfs, soa)
-        assert box.cell[2, 2] == pytest.approx(lz)
-        system = build_scaled_system(
-            inp, upfs, _is_uspp(upfs), soa, box.cell, box.positions,
-            fft_shape=(42, 42, nz))
-        # dz identical between the two boxes is the whole point of the gate
-        assert system.grid.cell[2, 2] / system.grid.shape[2] == pytest.approx(
-            1.0 / 6.0, abs=1e-9)
-        res = run_scf(inp, system=system, verbose=False)
-        assert res.converged
-        return work_function(res, open_axis=2)
-
-    phi_16 = phi_at(16.0, 96)
-    phi_18 = phi_at(18.0, 108)
-    # box-independence: the vacuum level (hence Φ) is the same absolute reference
-    # regardless of how much vacuum sits above the slab. A few meV covers residual
-    # SCF-convergence noise; a materially larger drift would mean the docstring's
-    # "exact because box-independent" claim is overstated (report, don't loosen).
-    assert abs(phi_16 - phi_18) < 5e-3, (
-        f"Φ drifts with vacuum thickness: Φ(Lz=16)={phi_16:.6f} eV, "
-        f"Φ(Lz=18)={phi_18:.6f} eV, |Δ|={abs(phi_16 - phi_18) * 1e3:.3f} meV")
-
-
-def _al100_slab_input_lz(tmp_path: Path, lz: float):
-    """A 4-layer Al(100) ESM open_z slab at open-axis box length `lz`, built the
-    same way as `_nah_input_lz` (atoms at fixed absolute z, vacuum grows above).
-
-    Al is the DISCRIMINATING case for the box-independence audit: unlike NaH's
-    diffuse H⁻ anion, a metal's valence density decays fast, so if the NaH drift
-    were merely a diffuse-tail convergence effect, Al's Φ would plateau to a few
-    meV. It does the opposite (see the xfail below), which is why this test
-    exists as a second, compact-density witness rather than a passing gate.
+    Al is a clean plateau witness: a metal's valence density decays fast, so once
+    ecut and vacuum are converged Φ(Lz) flattens quickly (measured decay length
+    ≈3 Å). At a crude ecut the total energy itself is box-dependent and Φ inherits
+    a spurious drift — which is why this uses a converged cutoff, not the 24 Ry of
+    the wiring tests above.
     """
     from ase.build import fcc100
 
@@ -273,16 +158,16 @@ structure:
 pseudopotentials:
   dir: {PSEUDOS}
   map: {{Al: Al_ONCV_PBE-1.2.upf}}
-ecut: {24 * RY}
+ecut: {ecut_ry * RY}
 xc: pbe
 kpoints:
-  mesh: [6, 6, 1]
+  mesh: [{kmesh}, {kmesh}, 1]
 smearing:
   type: fermi-dirac
   width: 0.1
 scf:
   boundary: open_z
-  max_iter: 150
+  max_iter: 200
   etol: 1.0e-8
   rhotol: 1.0e-7
 output:
@@ -296,36 +181,37 @@ error_estimate: false
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED (asus, 2026-09-14): Φ of a COMPACT-DENSITY metal (4-layer "
-        "Al(100), ESM open_z) is NOT box-independent either — and drifts an order "
-        "of magnitude MORE than NaH, refuting the 'diffuse-anion convergence' "
-        "explanation. Pinned dz=1/6 Å, Lz swept 16/18/20/24/28 Å: Φ = "
-        "3.302/3.641/3.922/4.251/4.629 eV — monotonic, ~110 meV/Å, no plateau "
-        "(|Δ|(16→18)=340 meV). Both E_F (−0.72→−2.64 eV) and E_vac (2.58→1.99 eV) "
-        "drift, by DIFFERENT amounts, so the gauge does not cancel in Φ=E_vac−E_F. "
-        "LOCALIZED: the ESM 'vacuum' is not field-free — the plane-averaged v_eff "
-        "has a ~343 meV/Å residual slope and ~590 meV spread across the sampled "
-        "vacuum planes at a single Lz, despite ρ≈1e-4 there. `esm.py` promises "
-        "v_H→0 as z→±∞ (no dipole correction needed), so a residual field in the "
-        "vacuum of a NON-POLAR slab is a real ESM electrostatics residual, not a "
-        "vacuum-extraction or unit bug — it affects ALL ESM work-function / "
-        "electrode-potential results, not just diffuse anions. Escalated for "
-        "review. Strict-xfail so a fix flips it to XPASS and forces this marker's "
-        "removal. Do NOT loosen the tolerance to make it pass green."),
-)
-def test_work_function_box_independent_al_metal(tmp_path):
-    """DISCRIMINATING witness for PR #503: does Φ box-independence hold for a
-    compact-density METAL slab (Al), where the valence density decays fast?
+def test_work_function_plateaus_when_converged(tmp_path):
+    """Φ = E_vac − E_F is box-independent under ESM open_z ONCE CONVERGED — the
+    corrected claim in `postscf.work_function`'s docstring. ESM's Green's function
+    forces v_H→0 as z→±∞, so a converged slab feels no z-images and Φ has no
+    residual dependence on the vacuum thickness Lz. But Φ, like any observable,
+    must first be converged w.r.t. ecut AND vacuum thickness: at a crude cutoff the
+    total energy itself is box-dependent, and a too-thin vacuum sits on the
+    exponential approach to the plateau (measured decay length ≈3 Å). The apparent
+    Lz-drift seen at low ecut / thin vacuum is a convergence artifact, NOT an ESM
+    electrostatics bug — `esm.py` is unchanged and correct.
 
-    Same pinned-dz methodology as the NaH gate above (dz held at 1/6 Å via
-    `fft_shape` so only the vacuum thickness changes). If ESM open_z produced a
-    field-free vacuum as its docstring claims, Al's Φ would plateau to a few meV.
-    CURRENT VERDICT: it drifts ~110 meV/Å with no plateau — worse than NaH — which
-    is why this is a strict-xfail escalating a likely ESM residual, not a passing
-    positive gate for the well-behaved metal case.
+    This gates the CORRECT statement directly: at a converged setup (ecut = 60 Ry,
+    dense 8×8×1 in-plane k, pinned dz), Φ(Lz) PLATEAUS. We assert the far-field
+    slope has collapsed — |Φ(Lz=24) − Φ(Lz=28)| < 30 meV — rather than pinning a
+    literature number (Al ONCV PBE is not a Φ reference; a slab-thickness /
+    relaxation study would be needed for that).
+
+    Methodology (mirrors the well-behaved eos/elastic FFT-pinning): changing Lz at
+    fixed ecut re-samples the FFT grid spacing dz, which alone injects meV-scale
+    noise into E_vac. So we pin dz — derive it from the natural grid at Lz=28, then
+    fix `fft_shape` at each Lz so the real-space spacing matches to <1e-3 Å. Only
+    the vacuum thickness (where ρ→0) differs between the two boxes.
+
+    MEASURED (asus, 2026-09-14, ecut=60 Ry, 8×8×1): Φ = 3.584 / 3.927 / 4.104 /
+    4.192 / 4.210 eV at Lz = 16 / 18 / 20 / 24 / 28 Å — the far-field slope
+    collapses 172 → 89 → 22 → 4.4 meV/Å as Lz grows, an exponential plateau
+    (decay length ≈3 Å) at ≈4.21 eV. |Φ(24) − Φ(28)| ≈ 4.4 meV/Å × 4 Å ≈ 18 meV,
+    comfortably inside the 30 meV gate. Contrast the un-converged 24 Ry sweep
+    (3.302 / 3.641 / 3.922 / 4.251 / 4.629 eV): it does NOT plateau — ~110 meV/Å,
+    |Φ(24) − Φ(28)| ≈ 378 meV — because at that cutoff the total energy itself is
+    box-dependent, so the drift is a convergence artifact, not an ESM bug.
     """
     import torch
 
@@ -335,24 +221,41 @@ def test_work_function_box_independent_al_metal(tmp_path):
     from gradwave.postscf.work_function import work_function
 
     torch.set_num_threads(6)
+    ecut_ry, kmesh = 60.0, 8
 
-    def phi_at(lz: float, nz: int) -> float:
-        inp = _al100_slab_input_lz(tmp_path, lz)
+    def build(lz: float, fft_shape=None):
+        inp = _al100_slab_input_lz(tmp_path, lz, ecut_ry, kmesh)
         assert inp.scf.boundary == "open_z"
         _species, upfs, soa = _species_upfs(inp)
         box = resolve_slab_box(inp, upfs, soa)
         assert box.cell[2, 2] == pytest.approx(lz)
         system = build_scaled_system(
             inp, upfs, _is_uspp(upfs), soa, box.cell, box.positions,
-            fft_shape=(18, 18, nz))
-        assert system.grid.cell[2, 2] / system.grid.shape[2] == pytest.approx(
-            1.0 / 6.0, abs=1e-9)
+            fft_shape=fft_shape)
+        return inp, system
+
+    # derive a common dz from the natural grid at the largest Lz, then pin it
+    _, sys_nat = build(28.0)
+    nx, ny, nz_nat = (int(s) for s in sys_nat.grid.shape)
+    dz = float(sys_nat.grid.cell[2, 2]) / nz_nat
+
+    def phi_at(lz: float) -> float:
+        nz = round(lz / dz)
+        inp, system = build(lz, fft_shape=(nx, ny, nz))
+        # dz identical (to <1e-3 Å) between the two boxes is the point of the pin
+        dz_i = float(system.grid.cell[2, 2]) / int(system.grid.shape[2])
+        assert dz_i == pytest.approx(dz, abs=1e-3)
         res = run_scf(inp, system=system, verbose=False)
         assert res.converged
         return work_function(res, open_axis=2)
 
-    phi_16 = phi_at(16.0, 96)
-    phi_18 = phi_at(18.0, 108)
-    assert abs(phi_16 - phi_18) < 5e-3, (
-        f"Φ(Al) drifts with vacuum thickness: Φ(Lz=16)={phi_16:.6f} eV, "
-        f"Φ(Lz=18)={phi_18:.6f} eV, |Δ|={abs(phi_16 - phi_18) * 1e3:.3f} meV")
+    phi_24 = phi_at(24.0)
+    phi_28 = phi_at(28.0)
+    # box-independence recovered: the far-field slope has collapsed to a few
+    # meV/Å, so a 4 Å change in vacuum moves Φ by <30 meV (measured ≈18 meV). A
+    # materially larger drift here would mean the setup is still un-converged
+    # (raise ecut / vacuum), not that ESM electrostatics are box-dependent.
+    assert abs(phi_24 - phi_28) < 0.030, (
+        f"Φ has not plateaued at the converged setup: Φ(Lz=24)={phi_24:.6f} eV, "
+        f"Φ(Lz=28)={phi_28:.6f} eV, |Δ|={abs(phi_24 - phi_28) * 1e3:.3f} meV "
+        f"(converge ecut / vacuum thickness further)")

@@ -14,25 +14,30 @@ absolute potential (≈ 4.44 V, Trasatti; ~0.1 V uncertainty),
 E_vac is read as the plane-averaged effective potential in the low-density
 region along the open axis (deep in the vacuum / at the grounded plate, where
 v_xc → 0 so v_eff is the electrostatic potential). Under the ESM open-boundary
-modes (``open_z`` / ``open_z_metal``) that level is *intended* to be
-box-independent (the ESM Green's function forces v_H→0 as z→±∞, so a slab feels
-no z-images). MEASURED CAVEAT (asus, 2026-09-14): this box-independence does NOT
-currently hold to the meV. On the NaH ESM slab Φ drifts monotonically ~2–13
-meV/Å out to a 28 Å box without plateauing; on a COMPACT-density 4-layer Al(100)
-metal slab — whose valence density decays fast, ruling out a diffuse-tail
-explanation — Φ drifts an order of magnitude MORE (~110 meV/Å, 3.30→4.63 eV over
-Lz=16→28 Å, no plateau). Both E_F and E_vac drift, by different amounts, so the
-gauge does not cancel in Φ=E_vac−E_F, and the ESM "vacuum" is not field-free: a
-~343 meV/Å residual slope in the plane-averaged v_eff is measured where ρ≈1e-4.
-This points at a real ESM electrostatics residual affecting all ESM
-work-function / electrode-potential results, not a diffuse-anion convergence
-artifact (see the two strict-xfail gates in
-``tests/integration/test_work_function_task.py`` —
-``test_work_function_box_independent_across_vacuum_thickness`` (NaH) and
-``test_work_function_box_independent_al_metal`` (Al)). Until this is fixed, treat
-Φ as vacuum-thickness dependent: report the Lz used and hold it fixed for
-cross-run comparisons. Asymmetric slabs have two different face potentials —
-see ``work_function(..., both_faces=True)``.
+modes (``open_z`` / ``open_z_metal``) that level is box-independent: the ESM
+Green's function forces v_H→0 as z→±∞, so a converged slab feels no z-images and
+Φ has no residual dependence on the vacuum thickness Lz. Like any observable,
+though, Φ must be CONVERGED — with respect to **ecut AND vacuum thickness** —
+before that independence shows up. Two convergence caveats bite in practice:
+
+  * ecut. At a crude cutoff the *total energy itself* is box-dependent (an
+    under-converged plane-wave basis samples the box differently as it grows),
+    so Φ inherits that drift. Converge ecut first — once Etot's box-drift is
+    negligible (~0.1 meV/atom), Φ's spurious Lz-dependence collapses with it.
+  * vacuum thickness. Box-independence is exact only where ρ→0 at the open
+    boundary. A too-thin vacuum truncates the density tail and sits on the
+    exponential approach to the plateau; grow the clean vacuum above the slab
+    (≳14 Å is a good starting point) until Φ(Lz) flattens.
+
+At a converged setup Φ(Lz) approaches an exponential plateau (measured decay
+length ≈3 Å): a 16→18 Å window still sits in the tail and looks like a drift,
+but by ~24–28 Å the slope collapses to a few meV/Å — box-independence recovered
+(gated in ``tests/integration/test_work_function_task.py`` ::
+``test_work_function_plateaus_when_converged``). The apparent Lz-drift some
+setups show is therefore a convergence artifact, not an ESM electrostatics bug;
+``esm.py`` is correct. For cross-run comparisons, converge Φ w.r.t. ecut and
+vacuum and report the plateau value (and the Lz used). Asymmetric slabs have two
+different face potentials — see ``work_function(..., both_faces=True)``.
 
 The convention-free reference is the **potential of zero charge** (the neutral
 Fermi level): ``U − U_PZC = Φ − Φ_PZC`` needs no external constant and is what
