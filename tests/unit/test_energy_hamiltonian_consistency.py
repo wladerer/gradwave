@@ -487,6 +487,236 @@ def test_grad_energy_equals_hamiltonian_soc_spinor():
     assert float(gap / expected.abs().max()) < 1e-10
 
 
+def _eh_gap_uspp_spinor_nc(upf_name, nb, occ_values, aug_channels=(0, 1, 2, 3),
+                           ecut_ry=16.0, seed=0):
+    """Spinor USPP/PAW off-stationarity gate: grad_c E == 2 w f (H c) on a
+    RATTLED P1 cell in a NONCOLLINEAR state — the untested cross-product of
+    the two patterns that each pass individually above:
+
+      * ``_eh_gap_uspp`` — the Q̃ augmentation-density chain, the ∫v_eff Q
+        screening of D, and the PAW one-center ddd == ∂E_1c/∂becsum.
+      * ``test_grad_energy_equals_hamiltonian_soc_spinor`` — the doubled
+        (2·npw) spinor coefficient axis and the Pauli B⃗·σ⃗ exchange-field
+        apply against the m⃗-chain of the energy.
+
+    ``scf_uspp_noncollinear`` fuses them: a scalar-relativistic USPP/PAW
+    (no SOC in S / the nonlocal D is scalar) driven with a noncollinear
+    magnetization, so the augmentation charge and the screened D carry FOUR
+    Pauli channels [n, m_x, m_y, m_z] (D_n = ∫v_eff Q + dij_bare + ddd_n,
+    D_i = ∫B_i Q + ddd_i for i ∈ {x, y, z}), assembled into the 2×2 spin
+    blocks D↑↑ = D_n+D_z, D↓↓ = D_n−D_z, D↑↓ = D_x − i·D_y. A random spinor
+    state gives a generically TILTED m⃗, so the off-diagonal D↑↓ blocks and
+    the m_x/m_y augmentation channels are exercised — exactly the terms that
+    vanish in the collinear-limit / rotation integration tests (which seed
+    moments ∥ẑ and ∥x̂, both with m_y = 0), where a sign or factor error can
+    cancel by symmetry (the O₂-vs-Si lesson).
+
+    ``aug_channels`` selects which becsum Pauli channels feed the augmentation
+    charge (E side) AND the screened D (H side) — the two must be toggled
+    together to stay an exact identity. It is a term-localization knob: with
+    the full set the m_y channel exposes a real sign bug (see the module-level
+    tests), so the machine-precision gate runs over the correct subset
+    (n, m_x, m_z) and the full set is guarded by a strict xfail. LDA only (the
+    non-collinear on-site XC is LDA-only), mirroring the loop.
+
+    Built with the loop's own ``_build_iter_ops`` / ``SpinorBatchedHS`` /
+    ``aug_dmat_batched`` / one-center helpers so the H the gate compares
+    against is bit-for-bit the operator the solver iterates."""
+    from gradwave.core.batch import g_to_r_b
+    from gradwave.core.fftbox import g_to_r_box
+    from gradwave.core.xc.noncollinear import (
+        NoncollinearXC,
+        energy_with_grid,
+        vxc_and_bxc,
+    )
+    from gradwave.core.xc.spin import LSDA_PW92
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.paw_noncollinear import (
+        e1c_nc_t,
+        onsite_nc_energy_and_ddd,
+        spinor_onsite_becsum,
+    )
+    from gradwave.scf.spinor_common import (
+        spinor_kinetic_energy,
+        spinor_scalar_nonlocal_energy,
+    )
+    from gradwave.scf.uspp import setup_uspp
+    from gradwave.scf.uspp_loop import (
+        _build_iter_ops,
+        _species_atoms,
+        aug_dmat_batched,
+    )
+    from gradwave.scf.uspp_noncollinear import SpinorBatchedHS
+
+    aug_channels = set(aug_channels)
+    xc = LSDA_PW92()
+    ncxc = NoncollinearXC(xc)
+    a = 5.43
+    lattice = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0.0, 0.0], [1.45, 1.27, 1.41]])  # rattled, P1
+    paw = parse_upf_paw(FIX / "pseudos" / upf_name)
+    system = setup_uspp(lattice, pos, [0, 0], [paw], ecut=ecut_ry * RY,
+                        kmesh=(2, 1, 1), use_symmetry=False)
+    ops = _build_iter_ops(system, xc, nspin=1, smearing="gaussian", width=0.1,
+                          batched=True)
+    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
+    bk, p_b = ops.bk, ops.p_b
+    assert bk is not None
+    nk, m_pw = ops.nk, bk.npw_max
+    kw = system.kweights
+    mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
+    mask_flat = ops.mask_flat
+    dij_bare = system.proj_data[0].dij_full
+
+    occ = torch.tensor(occ_values, dtype=RDTYPE)[None, :].repeat(nk, 1).to(dev)
+    occ[1:] = occ[1:].flip(dims=(1,))          # vary the occupations across k
+    f = kw[:, None] * occ
+
+    # ---- random noncollinear spinor state (NOT an eigenstate) ----
+    gen = torch.Generator().manual_seed(seed)
+    c = (torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE)
+         + 1j * torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE))
+    t2 = torch.cat([bk.t, bk.t], dim=-1)
+    c = c.to(CDTYPE).to(dev) / (1.0 + t2)[:, None, :] * mask2[:, None, :]
+    c = (c / torch.linalg.norm(c, dim=-1, keepdim=True)).requires_grad_(True)
+
+    # ---- E(c): Pauli grid density + 4-channel becsum augmentation ----
+    pu = g_to_r_b(c[..., :m_pw], bk, shape)
+    pd = g_to_r_b(c[..., m_pw:], bk, shape)
+    uu = torch.einsum("kb,kbxyz->xyz", f, pu.real**2 + pu.imag**2)
+    dd = torch.einsum("kb,kbxyz->xyz", f, pd.real**2 + pd.imag**2)
+    ud = torch.einsum("kb,kbxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
+    rho_sm = (uu + dd) / vol
+    m_sm = torch.stack([2.0 * ud.real, 2.0 * ud.imag, uu - dd]) / vol
+
+    # 2×2-in-spin becsum from the spinor projections (k folded into bands),
+    # real channels [n, mx, my, mz] — exactly the loop's bec_out_r
+    bud = torch.einsum("kpg,kbg->kbp", p_b.conj(),
+                       torch.cat([c[..., :m_pw], c[..., m_pw:]], dim=1))
+    bu, bd = bud[:, :nb], bud[:, nb:]
+    w_flat = f.reshape(-1).to(CDTYPE)
+    bu_f, bd_f = bu.reshape(nk * nb, -1), bd.reshape(nk * nb, -1)
+    bec_r: list[list[torch.Tensor]] = [
+        [None] * len(system.atom_slices) for _ in range(4)]  # type: ignore[list-item]
+    for ia, (s0, s1) in enumerate(system.atom_slices):
+        chans = spinor_onsite_becsum(bu_f[:, s0:s1], bd_f[:, s0:s1], w_flat)
+        for c4 in range(4):
+            bec_r[c4][ia] = chans[c4].real
+
+    # augmentation: n_aug → ρ, m⃗_aug → m⃗ from the matching becsum channel
+    aug_sph4 = torch.zeros(4, system.sphere_idx.shape[0], dtype=CDTYPE,
+                           device=dev)
+    for sp, atoms in _species_atoms(system).items():
+        bec_sp = torch.stack([
+            torch.stack([bec_r[c4][ia].to(CDTYPE) for ia in atoms])
+            for c4 in range(4)])
+        aug_sph4 = aug_sph4 + torch.einsum(
+            "caij,ijg,ga->cg", bec_sp, system.aug[sp].q_g,
+            ops.phase_pos[:, atoms].conj())
+    aug_box = torch.zeros(4, grid.n_points, dtype=CDTYPE, device=dev)
+    aug_box[:, system.sphere_idx] = aug_sph4 / vol
+    aug_fields = g_to_r_box(aug_box.reshape(4, *shape), real=True)
+    rho = rho_sm + (aug_fields[0] if 0 in aug_channels else 0.0)
+    m = torch.stack([
+        m_sm[i] + (aug_fields[i + 1] if (i + 1) in aug_channels
+                   else torch.zeros_like(m_sm[i]))
+        for i in range(3)])
+
+    rho_g = r_to_g(rho.to(CDTYPE))
+    e = (spinor_kinetic_energy(f, c, t2)
+         + hartree_energy(rho_g, grid.g2, vol)
+         + energy_with_grid(ncxc, rho, m, grid, rho_core=system.rho_core)
+         + local_energy(rho_g, ops.vloc_g, vol)
+         + spinor_scalar_nonlocal_energy(bu, bd, dij_bare, occ, kw, nk))
+    if ops.is_paw:
+        assert ops.onec is not None
+        for ia, sp in enumerate(system.species_of_atom):
+            e = e + e1c_nc_t(ops.onec[sp], [bec_r[c4][ia] for c4 in range(4)])
+    (g,) = torch.autograd.grad(e, c)
+
+    # ---- H side: the loop's own potentials + screened 4-channel D ----
+    with torch.no_grad():
+        rho_g_d = r_to_g(rho.detach().to(CDTYPE))
+        v_h = g_to_r_box(hartree_potential_g(rho_g_d, grid.g2), real=True)
+        v_xc, b_xc, _ = vxc_and_bxc(ncxc, rho.detach(), m.detach(), grid,
+                                    rho_core=system.rho_core)
+        v_r = v_h + v_xc + ops.vloc_r
+        pots = torch.stack([v_r, b_xc[0], b_xc[1], b_xc[2]])
+        pots_g_box = r_to_g(pots.to(CDTYPE)).reshape(4, -1)
+        d_all = aug_dmat_batched(system, pots_g_box[:, mask_flat],
+                                 ops.phase_pos)
+        # gate the ∫(v,B)Q screening to the same channels the E-side aug uses
+        d_chan = [d_all[c4] if c4 in aug_channels else torch.zeros_like(d_all[c4])
+                  for c4 in range(4)]
+        d_chan[0] = d_chan[0] + dij_bare
+        if ops.is_paw:
+            for ia, sp in enumerate(system.species_of_atom):
+                s0, s1 = system.atom_slices[ia]
+                _e1c, ddd = onsite_nc_energy_and_ddd(
+                    ops.onec[sp], [bec_r[c4][ia] for c4 in range(4)])
+                for c4 in range(4):
+                    d_chan[c4][s0:s1, s0:s1] += ddd[c4].to(dev)
+        # dual-grid smooth box: filter the 2×2 potentials onto it, exactly as
+        # the loop does for the H-apply (v_eff/B⃗ products stay within 2·G_max)
+        smooth = None
+        v_r_h, b_xc_h = v_r, b_xc
+        if system.smooth_shape is not None:
+            assert system.smooth2dense is not None
+            vb_s = g_to_r_box(
+                pots_g_box[:, system.smooth2dense].reshape(
+                    4, *system.smooth_shape), real=True)
+            v_r_h, b_xc_h = vb_s[0], vb_s[1:]
+            smooth = (system.smooth_shape, system.smooth_flat_idx)
+        hs = SpinorBatchedHS(bk, shape, v_r_h, b_xc_h, p_b, d_chan,
+                             system.q_full, smooth=smooth)
+        expected = 2.0 * kw[:, None, None] * occ[:, :, None] * hs.h(c.detach())
+    gap = ((g - expected) * mask2[:, None, :]).abs().max()
+    return float(gap / expected.abs().max())
+
+
+_SPINOR_NC_OCC = [1.0, 1.0, 0.9, 0.6, 0.3, 0.1]
+
+# This four-channel gate CAUGHT a real sign bug in the m_y augmentation coupling
+# of the noncollinear USPP/PAW path — invisible to every prior test, which seed
+# moments ∥ẑ and ∥x̂ (both m_y = 0) where first-order errors also vanish at self-
+# consistency (the O₂-vs-Si symmetric-cancellation trap). Per-channel measured
+# off-stationarity gap (rrkjus, rattled P1, random tilted spinor) BEFORE the fix:
+#     aug off / n / n+m_z / n+m_x / n+m_x+m_z    4.3e-16 … 6.6e-15   (all fine)
+#     n + m_y   /   all four channels            1.2e-03             <-- broke
+# Root cause: spinor_onsite_becsum built m_y = 1j*(r_ud - r_du) = -2 Im(b↑*b↓),
+# the OPPOSITE sign to the grid Pauli m_y = +2 Im(ρ↑↓) (spinor_common.
+# pauli_density_accumulate, consistent with the H's D↑↓ = D_x - i·D_y assembly),
+# so the m⃗_aug augmentation charge AND the PAW one-center ddd_my both routed the
+# projector-space m_y through the 2×2 D with a flipped sign. FIXED in
+# scf/paw_noncollinear.spinor_onsite_becsum (m_y = 1j*(r_du - r_ud)); all four
+# channels now collapse to ~6e-15 for BOTH rrkjus and kjpaw. These tests guard the
+# fix — a regression reintroduces the 1.2e-3 gap.
+_SPINOR_NC_ALL_CHANNELS = (0, 1, 2, 3)   # n, m_x, m_y, m_z
+
+
+def test_grad_energy_equals_hamiltonian_uspp_spinor_nc():
+    """Bare USPP (rrkjus), noncollinear — machine-precision gate over ALL four
+    Pauli channels (n, m_x, m_y, m_z): the spinor Q̃ augmentation chain, the
+    ∫(v_eff, B⃗) Q screening of the 2×2 D, and the full local v·1 + B⃗·σ⃗ exchange-
+    field apply, against autograd of the assembled energy on a rattled P1 cell
+    with a tilted m⃗. The m_y channel guards the sign bug this gate found (comment
+    above); no PAW one-center in the rrkjus path, so this isolates the
+    augmentation/exchange-field coupling."""
+    assert _eh_gap_uspp_spinor_nc(
+        "Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=_SPINOR_NC_ALL_CHANNELS) < 1e-10
+
+
+def test_grad_energy_equals_hamiltonian_paw_spinor_nc_all_channels():
+    """FULL four-channel augmentation (kjpaw): the same coupling, now also through
+    the PAW 2×2 one-center ddd_my (the augmentation and the one-center both route
+    the projector-space m_y through D↑↓ = D_x − i·D_y). Guards the m_y sign fix on
+    the PAW path — collapses to ~6e-15 with the corrected sign."""
+    assert _eh_gap_uspp_spinor_nc(
+        "Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=6, occ_values=_SPINOR_NC_OCC,
+        aug_channels=(0, 1, 2, 3)) < 1e-10
+
+
 def test_potentials_equal_autograd_of_energies():
     """Closed-form v_H, v_loc vs autograd of E_H, E_loc — two independent
     implementations of the same functional derivative must agree."""
