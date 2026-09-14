@@ -701,7 +701,7 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
          window: tuple[float, float] | None = None, method: str = "operator",
          resolve_images: bool = False, basis: str = "pswfc",
          summed_spins: bool = True,
-         paw_reconstruct: bool | str = True) -> COHP:
+         paw_reconstruct: bool | str = False) -> COHP:
     """Atom-pair COHP of a converged collinear SCF (norm-conserving, nspin 1/2).
 
     `pairs` selects atom index tuples (0-based); the default is every atom pair
@@ -720,13 +720,18 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     spheres (a no-op for a norm-conserving SCFResult, and for bare ultrasoft
     species with no one-center data). The becp is modified; the AO overlap metric
     is unchanged. Modes:
-      True / "ae" (default): candidate A, the textbook all-electron reconstruction
+      False (default): no augmentation (the smooth pseudo projection). The honest
+        default -- it makes NO unvalidated one-center correction and, per the
+        MEASURED table below, is the closest single mode to the oracle for C
+        (though not for Si). The two augmentation modes below are OPT-IN and
+        EXPERIMENTAL: they bracket the oracle but neither cleanly lands on it, so
+        they are offered for exploration, not as a validated quantitative fix.
+      True / "ae": candidate A, the textbook all-electron reconstruction
         <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>, W the
         AE-minus-PS partial-wave overlap (`_paw_ae_augment_matrix`).
       "smetric": candidate B, the S-metric (norm-restoring) augmentation
         <chi_p|S|psi~> = <chi_p|psi~> + sum_ij <chi_p|beta_i> q_ij <beta_j|psi~>,
         mirroring pdos._lowdin_weights_uspp.
-      False: no augmentation (the smooth pseudo projection).
 
     MEASURED against per-bond LOBSTER (per-spin ISPIN=1 convention,
     summed_spins=False, resolve_images=True, PAW psl pseudos): the two candidates
@@ -737,13 +742,16 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
         C        -9.43    -8.69      -10.96           -9.586
         Si       -5.77    -3.68      -4.78            -4.495
 
-    So candidate A (the default, physically rigorous) systematically OVERshoots
-    (lands ~9-18% below the oracle magnitude); B is closer on Si but overshoots
-    the other way on C; the smooth projection happens to sit near the oracle for
-    C and 28% over for Si. The residual is bracketed, not closed — LOBSTER's own
-    number is itself a basis/projection-dependent approximation, not the exact AE
-    value A targets. Treat the absolute per-bond magnitude as bracketed within
-    A..B, not exact.
+    So candidate A (the physically rigorous AE reconstruction) systematically
+    OVERshoots (lands ~9-18% below the oracle magnitude); B is closer on Si but
+    overshoots the other way on C; the smooth projection happens to sit near the
+    oracle for C and 28% over for Si. The residual is bracketed, not closed —
+    LOBSTER's own number is itself a basis/projection-dependent approximation, not
+    the exact AE value A targets. Treat the absolute per-bond magnitude as
+    bracketed within A..B, not exact. The reconstruction modes are opt-in and
+    EXPERIMENTAL; the dominant, sum-rule-validated accuracy lever is the spin
+    convention (`summed_spins`), which is what actually brings the raw ~2x
+    gradwave/LOBSTER ratio to ~1.
 
     `method` selects the AO Hamiltonian: "operator" (default) evaluates
     H~ = <phi~|H^|phi~> with the converged Kohn-Sham operator (energy-zero
@@ -864,6 +872,14 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
                     phi_beta = torch.einsum("pg,ig->pi", q.conj(), pbeta)  # <chi_p|beta_i>
                     pq = phi_beta @ q_full                                 # (nproj_ao, nproj_becp)
                     becp = becp + torch.einsum("pj,bj->bp", pq, beta_psi)
+                    # CONSISTENT S-metric: augment the Loewdin overlap too, to
+                    # <chi|S|chi> = <chi|chi> + sum_ij <chi|beta_i> q_ij <beta_j|chi>
+                    # (matches pdos._uspp_weights_k). PAW/USPP KS states are
+                    # S-orthonormal, so using the S-metric projection with the BARE
+                    # overlap breaks the resolution of identity -> negative charge
+                    # spilling and an off (0.94-1.16) sum rule; augmenting both
+                    # restores sum_pairs ICOHP = band energy up to spilling.
+                    overlap = overlap + pq @ phi_beta.conj().T
             proj = _lowdin_project(becp, overlap)                # (nb, nproj)
             if use_op:
                 from gradwave.core.hamiltonian import HamiltonianK, projectors
