@@ -553,8 +553,12 @@ def test_cohp_paw_ae_reconstruction_brackets_lobster(diamond_c_paw):
     ORACLE = -9.586  # LOBSTER per-bond C-C ICOHP, per-spin
 
     def bond(**kw):
+        # paw_reconstruct is an EIGENVALUE-route feature (it augments the AO
+        # becp); the operator route (now the default when the USPPResult carries
+        # v_eff) ignores it. Pin method="eigenvalue" so this test exercises the
+        # augmentation modes it is about.
         c = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
-                      summed_spins=False, **kw)
+                      summed_spins=False, method="eigenvalue", **kw)
         return c.pair_icohp["1-2"]
 
     smooth = bond(paw_reconstruct=False)
@@ -582,9 +586,53 @@ def test_cohp_paw_reconstruct_summed_spins_half(diamond_c_paw):
     two-electron value, for both the smooth and the AE-reconstructed projection."""
     res, _ = diamond_c_paw
     for recon in (False, True):
-        full = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+        full = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True, method="eigenvalue",
                          summed_spins=True, paw_reconstruct=recon)
-        half = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+        half = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True, method="eigenvalue",
                          summed_spins=False, paw_reconstruct=recon)
         assert half.pair_icohp["1-2"] == pytest.approx(
             0.5 * full.pair_icohp["1-2"], rel=1e-9)
+
+
+@pytest.mark.slow
+def test_cohp_paw_operator_route(diamond_c_paw):
+    """PAW COHP operator route H~ = O_S^{-1/2}<chi|H_PAW|chi>O_S^{-1/2}.
+
+    The eigenvalue route H~ = P†diag(eps)P carries the plane-wave energy zero,
+    so its per-bond ICOHP shifts when the eigenvalue reference is shifted, and
+    its all-pairs sum rule overcounts the band energy. The operator route
+    applies the converged PAW Hamiltonian directly, so it is EXACTLY invariant
+    under a rigid eigenvalue/Fermi shift (the strong correctness check) and its
+    charge spilling is positive (the S-metric overlap is consistent).
+
+    MEASURED (asus, C.pbe-n-kjpaw_psl, ecut 60 Ry, 2x2x2 unreduced): the
+    operator route is bit-exactly reference-invariant (|delta ICOHP| = 0 under a
+    +1 eV shift) where the eigenvalue route leaks ~2e-2 eV; charge_spill is
+    +0.0038 (positive); per-bond ICOHP -10.19 eV (summed_spins=True), i.e.
+    ratio_x2 = 2.13 vs the LOBSTER oracle -9.586 (per-spin) -- the residual is
+    the contracted-STO basis-definition difference, not a reference leak."""
+    res, _ = diamond_c_paw
+    assert res.v_eff is not None and res.dscr is not None  # SCF retained them
+
+    op = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True, method="operator",
+                   summed_spins=False)
+    assert op.method == "operator"          # the operator route actually fired
+    assert op.pair_icohp["1-2"] < 0         # bonding
+    assert op.charge_spilling > 0           # S-metric overlap is consistent
+
+    # reference invariance: a rigid +1 eV shift leaves the operator ICOHP exact
+    base = op.pair_icohp["1-2"]
+    eig_save, fermi_save = res.eigenvalues.clone(), res.fermi
+    res.eigenvalues = res.eigenvalues + 1.0
+    res.fermi = res.fermi + 1.0
+    try:
+        shifted = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                            method="operator", summed_spins=False).pair_icohp["1-2"]
+        leaky = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                          method="eigenvalue", summed_spins=False).pair_icohp["1-2"]
+    finally:
+        res.eigenvalues, res.fermi = eig_save, fermi_save
+    assert shifted == pytest.approx(base, abs=1e-6)     # operator: invariant
+    base_eig = cohp.cohp(res, pairs=[(0, 1)], resolve_images=True,
+                         method="eigenvalue", summed_spins=False).pair_icohp["1-2"]
+    assert abs(leaky - base_eig) > 1e-4                 # eigenvalue: leaks
