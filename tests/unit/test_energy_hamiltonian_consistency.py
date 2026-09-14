@@ -116,12 +116,20 @@ def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0, hubbard=None):
     c = _random_coeffs(system, nb, seed).requires_grad_(True)
     trimmed = [c[ik, :, : int(bk.npw[ik])] for ik in range(nk)]
     rho = density_b(c, occ, kw, bk, grid.shape, grid.volume)
+    # meta-GGA: τ̃(r) = ½Σ w f|∇ψ|² is an orbital field (NOT a functional of ρ),
+    # built through the SAME differentiable path the H's v_τ operator inverts —
+    # DIFFERENTIABLE in c here (the SCF holds it fixed at the stationary point,
+    # which is exactly why the τ-response never shows up in the FD dE/dλ check).
+    tau = None
+    if getattr(xc, "needs_tau", False):
+        from gradwave.core.metagga import tau_b
+        tau = tau_b(c, occ, kw, bk, grid.shape, grid.volume)
     eb = total_energy(
         coeffs_per_k=trimmed, occ=occ, kweights=kw, spheres=spheres, grid=grid,
         rho=rho, positions=system.positions, charges=system.charges,
         species_index=system.species_index, vloc_tables=system.vloc_tables,
         becp_per_k=[becp_b(projs, c)[ik] for ik in range(nk)], dij_full=dij,
-        xc=xc, rho_core=system.rho_core,
+        xc=xc, rho_core=system.rho_core, tau=tau,
     )
     e_tot = eb.total
     n_half = None
@@ -139,11 +147,29 @@ def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0, hubbard=None):
             from gradwave.core.hubbard import hubbard_dmatrix
             hub_dij = hubbard_dmatrix([m.detach() for m in n_half], hub.sites,
                                       hub.nproj, c.device).conj()
+        tau_det = None if tau is None else tau.detach()
         veff = effective_potentials(system, xc, [rho.detach()],
-                                    local_potential_r(system))[0]
+                                    local_potential_r(system), tau=tau_det)[0]
         h = BatchedHamiltonian(bk, grid.shape, veff, projs,
                                hub_q=hub_q, hub_dij=hub_dij)
-        expected = 2.0 * kw[:, None, None] * occ[:, :, None] * h.apply(c.detach())
+
+        def h_apply(cc, _h=h):
+            return _h.apply(cc)
+
+        if tau_det is not None:
+            # generalized-KS τ term −½∇·(v_τ∇ψ) composed onto the H-apply,
+            # mirroring scf.loop's _metagga_vtau + _metagga_ops_from_vtau: the
+            # multiplicative v_xc above is ∂e_xc/∂ρ|_τ, this is the ∂e_xc/∂τ half.
+            from gradwave.core.metagga import metagga_tau_operator
+            from gradwave.scf.loop import vtau_potential
+            core = system.rho_core
+            rho_for_xc = rho.detach() if core is None else rho.detach() + core
+            v_tau = vtau_potential(xc, rho_for_xc, tau_det, grid)
+
+            def h_apply(cc, _h=h, _v=v_tau, _bk=bk, _sh=grid.shape):
+                return _h.apply(cc) + metagga_tau_operator(cc, _v, _bk, _sh)
+
+        expected = 2.0 * kw[:, None, None] * occ[:, :, None] * h_apply(c.detach())
     mask = bk.mask[:, None, :]
     gap = ((g - expected) * mask).abs().max()
     return float(gap / expected.abs().max())
@@ -184,6 +210,23 @@ def test_grad_energy_equals_hamiltonian_nlcc():
     assert system.rho_core is not None
     assert _eh_gap_nspin1(system, PBE(), nb=8,
                           occ_values=[2.0] * 5 + [1.5, 0.8, 0.3]) < 1e-10
+
+
+def test_grad_energy_equals_hamiltonian_metagga_r2scan():
+    """meta-GGA (r2SCAN): the generalized-KS τ term. E_xc depends on the
+    orbital kinetic-energy density τ̃ = ½Σf|∇ψ|², so ∂E_xc/∂c carries a
+    τ-response ∂E_xc/∂τ · ∂τ/∂c on TOP of the ρ path. The SCF's H folds this
+    in as the operator −½∇·(v_τ∇ψ) (core.metagga.metagga_tau_operator with
+    v_τ = ∂e_xc/∂τ) — a term the FD dE/dλ=∫τ check can't reach (it vanishes at
+    the stationary point) and machine-FD caps at 1e-3. At a RANDOM off-
+    stationary state the τ-response is O(1); autograd of the τ-dependent energy
+    must equal 2 w f (H c) INCLUDING v_τ to machine precision, gating the τ̃
+    definition, the v_τ extraction, and the −½/i(k+G) factors of the operator
+    against each other."""
+    from gradwave.core.xc.r2scan import R2SCAN
+    system = _si2_rattled()
+    assert _eh_gap_nspin1(system, R2SCAN(), nb=5,
+                          occ_values=[2.0, 2.0, 2.0, 1.2, 0.4]) < 1e-10
 
 
 def test_grad_energy_equals_hamiltonian_spin():
