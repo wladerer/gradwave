@@ -764,11 +764,22 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     (USPPResult) SCF: for PAW it applies the converged PAW Hamiltonian and overlap
     (`scf.uspp_loop._HkS`) to the AO projectors and builds H~ in the S-metric
     Loewdin basis, H~ = O_S^{-1/2} <chi|H_PAW|chi> O_S^{-1/2} with the S-metric
-    projection becp_S = <chi|S|psi~>. This is sum-rule-exact and reference-
-    invariant, unlike the PAW eigenvalue route (which overcounts the band energy
-    by ~2-8%). It needs the converged v_eff/dscr the SCF now retains on the
-    USPPResult; a result without them (an old checkpoint) falls back to the
-    eigenvalue route with a logged warning.
+    projection becp_S = <chi|S|psi~>. This is exactly reference-invariant (the
+    operator H~ never touches eps, so a rigid eig+fermi shift leaves ICOHP bit-
+    identical -- measured |Delta|=0) and metric-consistent (positive charge
+    spilling), unlike the PAW eigenvalue route (reference leak ~2e-2 eV/eV +
+    negative charge spilling). It is NOT sum-rule-exact, however: the sum rule is
+    ~1.03-1.09 (measured C/Si), an AO-basis-INCOMPLETENESS overshoot of the
+    projected <H> -- better-behaved than the eigenvalue route but not 1. And it is
+    NOT an absolute-magnitude fix: per-bond ICOHP stays ~1.06-1.22x the LOBSTER
+    per-spin oracle (after the summed_spins/2 convention), a basis-DEFINITION
+    difference (LOBSTER's contracted STOs on all-electron wavefunctions), which is
+    now demonstrated rather than assumed -- gradwave's COHP is internally self-
+    consistent (spin convention, S-metric, reference-invariance all fixed) and
+    STILL differs, so the residual is definitional, not a bug. It needs the
+    converged v_eff/dscr the SCF now retains on the USPPResult; a result without
+    them (an old checkpoint) falls back to the eigenvalue route with a logged
+    warning.
 
     `resolve_images` restricts each pair to the single nearest image of atom j (the
     min-image bond) instead of the whole j sublattice, for a per-bond number
