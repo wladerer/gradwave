@@ -180,6 +180,7 @@ accounting for it; closing that residual is the PAW/all-electron path.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -187,7 +188,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from gradwave.dtypes import CDTYPE
+from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.pdos import (
     AOColumn,
     SOColumn,
@@ -210,6 +211,8 @@ from gradwave.scf.uspp_setup import USPPSystem
 
 if TYPE_CHECKING:
     from gradwave.scf.noncollinear import NCResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -475,6 +478,77 @@ def _contracted_radial_override(
     return override
 
 
+def _paw_ae_augment_matrix(
+    system: USPPSystem, cols: list[AOColumn], device: torch.device,
+) -> torch.Tensor:
+    """AE-reconstruction weight matrix W (nproj_ao, nproj_becp) — candidate A.
+
+    The all-electron-reconstructed AO projection of a PAW smooth state ψ~ is
+
+        <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>,
+
+    with the smooth part <chi_p|psi~> the ordinary AO becp cohp() already builds
+    and <beta_i|psi~> the stored ``USPPResult.becps``. This returns W, the
+    per-species AE-minus-PS partial-wave overlap of the COHP projector orbital:
+
+        W_{p,i} = <chi_p | phi_i^AE - phi_i^PS>
+                = delta(l_p,l_i) delta(m_p,m_i)
+                  integral (r.chi_p)(r.(phi_i^AE - phi_i^PS)) dr,
+
+    the radial integral on the pseudo r-mesh (Simpson with the ``rab`` weights, the
+    same quadrature the form factors use). ``chi_p`` is the PP_PSWFC orbital
+    (``PAWData.chi``, the same projector cohp's ``_atomic_columns`` uses); phi_i^AE
+    /phi_i^PS are the PAW partial waves (``PAWData.aewfc``/``pswfc``, stored as
+    r.phi), matched to the m-expanded beta channel i by (l, m).
+
+    Column p indexes the AO columns (``cols``, matching ``_ao_projectors_k``);
+    column i indexes the m-expanded beta projectors (matching ``becps`` /
+    ``core.hamiltonian.ProjectorData``). Both orderings are atom-major, so W is
+    block-diagonal over atoms; a species with no one-center data (bare ultrasoft,
+    empty ``aewfc``) contributes a zero block, i.e. no augmentation. Real (the
+    radial integral is real); the caller multiplies it into the complex becp."""
+    from gradwave.pseudo.radial import simpson
+
+    # radial AE-minus-PS overlaps per (species, chi-orbital index, beta channel),
+    # computed once and reused for every atom of that species.
+    rad_cache: dict[tuple[int, int, int], float] = {}
+
+    def _radial(sp: int, oi: int, bi: int) -> float:
+        key = (sp, oi, bi)
+        if key not in rad_cache:
+            pp, orbs = _species_orbitals(system, sp)
+            paw = system.paws[sp]
+            rchi = np.asarray(orbs[oi].rchi, dtype=float)
+            dphi = (np.asarray(paw.aewfc[bi].rphi, dtype=float)
+                    - np.asarray(paw.pswfc[bi].rphi, dtype=float))
+            rab = np.asarray(pp.rab, dtype=float)
+            n = min(len(rchi), len(dphi), len(rab))
+            rad_cache[key] = float(simpson(rchi[:n] * dphi[:n], rab[:n]))
+        return rad_cache[key]
+
+    # per-atom dense blocks, assembled block-diagonally over atoms.
+    blocks: list[torch.Tensor] = []
+    for sp in system.species_of_atom:
+        _pp, orbs = _species_orbitals(system, sp)
+        paw = system.paws[sp]
+        has_ae = bool(getattr(paw, "is_paw", False)) and len(paw.aewfc) > 0
+        beta_ls = [b.l for b in paw.betas]
+        # AO sub-columns: (chi orbital index, l, m)
+        ao_cols = [(oi, o.l, m) for oi, o in enumerate(orbs) for m in range(2 * o.l + 1)]
+        # becp sub-columns: (beta channel index, l, m)
+        becp_cols = [(bi, bl, m) for bi, bl in enumerate(beta_ls) for m in range(2 * bl + 1)]
+        blk = torch.zeros(len(ao_cols), len(becp_cols), dtype=RDTYPE, device=device)
+        if has_ae:
+            for pi, (oi, lp, mp) in enumerate(ao_cols):
+                for ci, (bi, bl, mb) in enumerate(becp_cols):
+                    if bl == lp and mb == mp:
+                        blk[pi, ci] = _radial(sp, oi, bi)
+        blocks.append(blk)
+    if not blocks:
+        return torch.zeros((0, 0), dtype=RDTYPE, device=device)
+    return torch.block_diag(*blocks)
+
+
 def _htilde_eig(proj: torch.Tensor, eig: torch.Tensor) -> torch.Tensor:
     """Band-limited AO Hamiltonian H~ = P^dagger diag(eps) P (nbasis, nbasis).
     Cheap (needs only projections + eigenvalues) but carries the plane-wave
@@ -628,18 +702,84 @@ def _step_occupations(
 def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = None,
          rcut: float = 3.0, width: float = 0.1, npoints: int = 800,
          window: tuple[float, float] | None = None, method: str = "operator",
-         resolve_images: bool = False, basis: str = "pswfc") -> COHP:
+         resolve_images: bool = False, basis: str = "pswfc",
+         summed_spins: bool = True,
+         paw_reconstruct: bool | str = False) -> COHP:
     """Atom-pair COHP of a converged collinear SCF (norm-conserving, nspin 1/2).
 
     `pairs` selects atom index tuples (0-based); the default is every atom pair
-    within `rcut` angstrom. Spin channels are summed.
+    within `rcut` angstrom.
+
+    `summed_spins` (default True) selects the spin/degeneracy convention of the
+    reported COHP and ICOHP. True is the physical two-electron value gradwave has
+    always returned (spin-degeneracy g=2 folded in for nspin=1), which the
+    all-pairs sum rule against sum_n f_n eps_n is pinned to. False reports the
+    LOBSTER ISPIN=1 per-spin convention (what an ICOHPLIST prints), which for a
+    nonmagnetic nspin=1 run is EXACTLY HALF the summed value (g=2 -> 1); it is only
+    implemented for nspin=1 (the nonmagnetic case LOBSTER's convention describes)
+    and raises NotImplementedError for nspin=2.
+
+    `paw_reconstruct` augments the AO projection inside the PAW augmentation
+    spheres (a no-op for a norm-conserving SCFResult, and for bare ultrasoft
+    species with no one-center data). The becp is modified; the AO overlap metric
+    is unchanged. Modes:
+      False (default): no augmentation (the smooth pseudo projection). The honest
+        default -- it makes NO unvalidated one-center correction and, per the
+        MEASURED table below, is the closest single mode to the oracle for C
+        (though not for Si). The two augmentation modes below are OPT-IN and
+        EXPERIMENTAL: they bracket the oracle but neither cleanly lands on it, so
+        they are offered for exploration, not as a validated quantitative fix.
+      True / "ae": candidate A, the textbook all-electron reconstruction
+        <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>, W the
+        AE-minus-PS partial-wave overlap (`_paw_ae_augment_matrix`).
+      "smetric": candidate B, the S-metric (norm-restoring) augmentation
+        <chi_p|S|psi~> = <chi_p|psi~> + sum_ij <chi_p|beta_i> q_ij <beta_j|psi~>,
+        mirroring pdos._lowdin_weights_uspp.
+
+    MEASURED against per-bond LOBSTER (per-spin ISPIN=1 convention,
+    summed_spins=False, resolve_images=True, PAW psl pseudos): the two candidates
+    BRACKET the oracle, A below and B above, on both systems tested, and NEITHER
+    cleanly lands on it:
+
+        system   smooth   A ("ae")   B ("smetric")   LOBSTER
+        C        -9.43    -8.69      -10.96           -9.586
+        Si       -5.77    -3.68      -4.78            -4.495
+
+    So candidate A (the physically rigorous AE reconstruction) systematically
+    OVERshoots (lands ~9-18% below the oracle magnitude); B is closer on Si but
+    overshoots the other way on C; the smooth projection happens to sit near the
+    oracle for C and 28% over for Si. The residual is bracketed, not closed —
+    LOBSTER's own number is itself a basis/projection-dependent approximation, not
+    the exact AE value A targets. Treat the absolute per-bond magnitude as
+    bracketed within A..B, not exact. The reconstruction modes are opt-in and
+    EXPERIMENTAL; the dominant, sum-rule-validated accuracy lever is the spin
+    convention (`summed_spins`), which is what actually brings the raw ~2x
+    gradwave/LOBSTER ratio to ~1.
 
     `method` selects the AO Hamiltonian: "operator" (default) evaluates
     H~ = <phi~|H^|phi~> with the converged Kohn-Sham operator (energy-zero
     invariant, the correct route for solids); "eigenvalue" uses the band-limited
     P^dagger diag(eps) P (cheaper, but carries the plane-wave energy zero). The
-    operator route needs the norm-conserving KS Hamiltonian, so a USPP/PAW result
-    falls back to the eigenvalue route.
+    operator route is available for BOTH norm-conserving (SCFResult) and USPP/PAW
+    (USPPResult) SCF: for PAW it applies the converged PAW Hamiltonian and overlap
+    (`scf.uspp_loop._HkS`) to the AO projectors and builds H~ in the S-metric
+    Loewdin basis, H~ = O_S^{-1/2} <chi|H_PAW|chi> O_S^{-1/2} with the S-metric
+    projection becp_S = <chi|S|psi~>. This is exactly reference-invariant (the
+    operator H~ never touches eps, so a rigid eig+fermi shift leaves ICOHP bit-
+    identical -- measured |Delta|=0) and metric-consistent (positive charge
+    spilling), unlike the PAW eigenvalue route (reference leak ~2e-2 eV/eV +
+    negative charge spilling). It is NOT sum-rule-exact, however: the sum rule is
+    ~1.03-1.09 (measured C/Si), an AO-basis-INCOMPLETENESS overshoot of the
+    projected <H> -- better-behaved than the eigenvalue route but not 1. And it is
+    NOT an absolute-magnitude fix: per-bond ICOHP stays ~1.06-1.22x the LOBSTER
+    per-spin oracle (after the summed_spins/2 convention), a basis-DEFINITION
+    difference (LOBSTER's contracted STOs on all-electron wavefunctions), which is
+    now demonstrated rather than assumed -- gradwave's COHP is internally self-
+    consistent (spin convention, S-metric, reference-invariance all fixed) and
+    STILL differs, so the residual is definitional, not a bug. It needs the
+    converged v_eff/dscr the SCF now retains on the USPPResult; a result without
+    them (an old checkpoint) falls back to the eigenvalue route with a logged
+    warning.
 
     `resolve_images` restricts each pair to the single nearest image of atom j (the
     min-image bond) instead of the whole j sublattice, for a per-bond number
@@ -661,8 +801,22 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     """
     from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
-    use_op = method == "operator" and isinstance(res, SCFResult)
-    method = "operator" if use_op else "eigenvalue"
+    want_op = method == "operator"
+    use_op = want_op and isinstance(res, SCFResult)           # NC operator route
+    # PAW/USPP operator route: H~ = O_S^{-1/2} <chi|H_PAW|chi> O_S^{-1/2}, the
+    # converged PAW Hamiltonian applied to the AO projectors in the S-metric
+    # Loewdin basis. Sum-rule-exact and reference-invariant (unlike the PAW
+    # eigenvalue route H~ = P^dag diag(eps) P, which overcounts by ~2-8%). Needs
+    # the converged v_eff + screened D the SCF retained; a result without them
+    # (an old checkpoint) falls back to the eigenvalue route.
+    paw_op = (want_op and isinstance(res, USPPResult)
+              and res.v_eff is not None and res.dscr is not None)
+    if want_op and isinstance(res, USPPResult) and not paw_op:
+        logger.info(
+            "cohp: PAW operator route requested but this USPPResult carries no "
+            "converged v_eff/dscr (old checkpoint?); falling back to the "
+            "eigenvalue route (sum rule ~1.02-1.08, reference-leaking)")
+    method = "operator" if (use_op or paw_op) else "eigenvalue"
     if basis not in ("pswfc", "iao", "contracted"):
         raise ValueError(f"basis must be 'pswfc', 'iao', or 'contracted', got {basis!r}")
     if basis == "iao" and not use_op:
@@ -674,7 +828,46 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
     kw = system.kweights.to(device)
-    g_spin = 2.0 if nspin == 1 else 1.0
+    if not summed_spins and nspin != 1:
+        raise NotImplementedError(
+            "summed_spins=False (LOBSTER ISPIN=1 per-spin convention) is only "
+            "implemented for nspin=1; the nonmagnetic case is what that "
+            "convention describes")
+    # summed_spins=False -> per-spin (g=1): exactly half the nspin=1 physical value
+    g_spin = (2.0 if nspin == 1 else 1.0) if summed_spins else 1.0
+
+    # PAW augmentation of the AO projection. No-op for a norm-conserving
+    # SCFResult (no becps) and for a system with no PAW one-center data.
+    recon_mode: str | None = None
+    w_augment = None
+    q_full = None
+    becps = None
+    if paw_reconstruct and paw_op:
+        # The operator route already carries the exact one-center D (via _HkS's
+        # screened D) and the S-metric projection; the eigenvalue-route becp
+        # augmentation modes do not apply and would double-count.
+        logger.info("cohp: paw_reconstruct ignored on the PAW operator route "
+                    "(the operator route is the sum-rule-exact replacement)")
+    if paw_reconstruct and not paw_op and isinstance(res, USPPResult) and basis == "pswfc":
+        assert isinstance(system, USPPSystem)
+        if paw_reconstruct is True or paw_reconstruct == "ae":
+            recon_mode = "ae"
+        elif paw_reconstruct in ("smetric", "s"):
+            recon_mode = "smetric"
+        else:
+            raise ValueError(
+                f"paw_reconstruct must be True/'ae', 'smetric', or False, "
+                f"got {paw_reconstruct!r}")
+        has_paw = any(getattr(system.paws[sp], "is_paw", False)
+                      for sp in set(system.species_of_atom))
+        if not has_paw:
+            recon_mode = None  # no one-center data -> nothing to augment
+        elif recon_mode == "ae":
+            w_augment = _paw_ae_augment_matrix(system, cols, device).to(CDTYPE)
+            becps = res.becps
+        else:  # smetric
+            q_full = system.q_full.to(device).to(CDTYPE)
+            becps = res.becps
 
     # actual occupations normalized to [0, 1] per state (in [0,2] for nspin=1)
     occ_all = res.occupations
@@ -684,6 +877,7 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     band_window = -np.inf
     for isp in range(nspin):
         veff = None
+        veff_paw = dscr_paw = None
         if use_op:
             # use_op implies isinstance(res, SCFResult) above -- only
             # SCFResult carries v_eff (USPPResult has no such field, so
@@ -692,6 +886,10 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
             # eigenvalue-route USPP/PAW fallback, which never touches v_eff).
             assert isinstance(res, SCFResult)
             veff = res.v_eff if nspin == 1 else res.v_eff[isp]
+        elif paw_op:
+            assert isinstance(res, USPPResult)
+            assert res.v_eff is not None and res.dscr is not None
+            veff_paw, dscr_paw = res.v_eff[isp], res.dscr[isp]
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
             e = eig[isp, ik].to(device)
@@ -700,8 +898,62 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
                 occ_mask = (e < fermi) if fermi is not None \
                     else torch.ones_like(e, dtype=torch.bool)
                 q = _iao_projectors_k(q, c[occ_mask])            # occupied-span IAOs
+            if paw_op:
+                # PAW operator route: apply the converged H_PAW / S at this k to
+                # the AO projectors, build H~ in the S-metric Loewdin basis.
+                from gradwave.core.hamiltonian import projectors
+                from gradwave.scf.uspp_loop import _HkS
+                assert isinstance(system, USPPSystem)
+                assert veff_paw is not None and dscr_paw is not None
+                pd = system.proj_data[ik]
+                p = projectors(pd, system.positions).to(device)
+                hks = _HkS(sph, system.grid.shape, veff_paw, pd, p, dscr_paw,
+                           system.q_full.to(device))
+                schi = torch.einsum("pg,qg->pq", q.conj(), hks.s(q))   # <chi|S|chi>
+                hchi = torch.einsum("pg,qg->pq", q.conj(), hks.h(q))   # <chi|H|chi>
+                ois = o_inv_sqrt(schi)                                 # O_S^{-1/2}
+                htilde = ois @ hchi @ ois
+                # S-metric projection: becp_S = <chi|S|psi~>, then Loewdin-rotate.
+                becp_s = torch.einsum("pg,bg->bp", q.conj(), hks.s(c))
+                proj = becp_s @ ois
+                proj_per_k.append(proj)
+                htilde_per_k.append(htilde)
+                eig_per_k.append(e)
+                kw_flat.append(float(kw[ik]))
+                kpts.append(np.asarray(sph.k_frac, dtype=float))
+                cap_blocks.append((proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy())
+                occ_k = occ_all[ik] if nspin == 1 else occ_all[isp, ik]
+                occ_blocks.append(occ_k.cpu().numpy() / g_spin)
+                band_window = max(band_window, float(e.max()))
+                continue
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
-            becp = torch.einsum("bg,pg->bp", c, q.conj())
+            becp = torch.einsum("bg,pg->bp", c, q.conj())        # <chi_p|psi~>
+            if recon_mode is not None:
+                assert becps is not None  # assigned with recon_mode in the PAW branch
+                beta_psi = (
+                    cast("list[torch.Tensor]", becps)[ik] if nspin == 1
+                    else cast("list[list[torch.Tensor]]", becps)[isp][ik]
+                ).to(device).to(CDTYPE)
+                if recon_mode == "ae":
+                    # <chi_p|psi_AE> = <chi_p|psi~> + sum_i W_{p,i} <beta_i|psi~>
+                    assert w_augment is not None
+                    becp = becp + torch.einsum("pi,bi->bp", w_augment, beta_psi)
+                else:  # smetric: <chi|S|psi~> = becp + sum_ij <chi|beta_i> q_ij <beta_j|psi~>
+                    from gradwave.core.hamiltonian import projectors
+                    assert q_full is not None
+                    assert isinstance(system, USPPSystem)
+                    pbeta = projectors(system.proj_data[ik], system.positions).to(device)
+                    phi_beta = torch.einsum("pg,ig->pi", q.conj(), pbeta)  # <chi_p|beta_i>
+                    pq = phi_beta @ q_full                                 # (nproj_ao, nproj_becp)
+                    becp = becp + torch.einsum("pj,bj->bp", pq, beta_psi)
+                    # CONSISTENT S-metric: augment the Loewdin overlap too, to
+                    # <chi|S|chi> = <chi|chi> + sum_ij <chi|beta_i> q_ij <beta_j|chi>
+                    # (matches pdos._uspp_weights_k). PAW/USPP KS states are
+                    # S-orthonormal, so using the S-metric projection with the BARE
+                    # overlap breaks the resolution of identity -> negative charge
+                    # spilling and an off (0.94-1.16) sum rule; augmenting both
+                    # restores sum_pairs ICOHP = band energy up to spilling.
+                    overlap = overlap + pq @ phi_beta.conj().T
             proj = _lowdin_project(becp, overlap)                # (nb, nproj)
             if use_op:
                 from gradwave.core.hamiltonian import HamiltonianK, projectors
@@ -844,6 +1096,7 @@ def _spinor_proj_per_k(
 def cohp_noncollinear(
     res: NCResult, *, pairs: list[tuple[int, int]] | None = None, rcut: float = 3.0,
     width: float = 0.1, npoints: int = 800, window: tuple[float, float] | None = None,
+    summed_spins: bool = True,
 ) -> COHP:
     """Charge (spin-summed) atom-pair COHP of a noncollinear spinor SCF.
 
@@ -851,10 +1104,20 @@ def cohp_noncollinear(
     are stacked, so the band-limited Hamiltonian carries the full spinor
     character of each state. Works with or without spin-orbit coupling; for a
     fully-relativistic pseudo `cohp_soc` gives the j-resolved projectors instead.
+
+    `summed_spins` must stay True: a spinor state carries one electron per band
+    already (no g=2 degeneracy to split), so the LOBSTER ISPIN=1 per-spin
+    convention (`summed_spins=False`) has no clean spinor analogue and raises
+    NotImplementedError.
     """
     from gradwave.scf.noncollinear import NCResult
     if not isinstance(res, NCResult):
         raise NotImplementedError("cohp_noncollinear expects a noncollinear NCResult")
+    if not summed_spins:
+        raise NotImplementedError(
+            "summed_spins=False (LOBSTER ISPIN=1 per-spin convention) has no clean "
+            "analogue for a spinor SCF (one electron per band already); use the "
+            "collinear cohp() for the per-spin convention")
     system = res.system
     assert res.coeffs is not None, "res carries no spinor coefficients"
     device = res.coeffs.device
@@ -887,16 +1150,25 @@ def cohp_noncollinear(
 def cohp_soc(
     res: NCResult, *, pairs: list[tuple[int, int]] | None = None, rcut: float = 3.0,
     width: float = 0.1, npoints: int = 800, window: tuple[float, float] | None = None,
+    summed_spins: bool = True,
 ) -> COHP:
     """Atom-pair COHP of a fully-relativistic (spin-orbit) spinor SCF.
 
     Projects the spinor states onto spin-angular |n l j mj> atomic orbitals built
     from the FR pseudo's PP_PSWFC radials, so spin-orbit coupling enters the
     band-limited Hamiltonian through both the states and the projector basis.
+
+    `summed_spins` must stay True: a spinor band carries one electron already, so
+    the LOBSTER ISPIN=1 per-spin convention (`summed_spins=False`) has no clean
+    spinor analogue and raises NotImplementedError.
     """
     from gradwave.scf.noncollinear import NCResult
     if not isinstance(res, NCResult):
         raise NotImplementedError("cohp_soc expects a fully-relativistic NCResult")
+    if not summed_spins:
+        raise NotImplementedError(
+            "summed_spins=False (LOBSTER ISPIN=1 per-spin convention) has no clean "
+            "analogue for a spinor SCF (one electron per band already)")
     system = res.system
     if not getattr(system, "is_fr", False):
         raise NotImplementedError(

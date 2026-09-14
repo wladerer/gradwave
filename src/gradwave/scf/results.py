@@ -124,9 +124,19 @@ class USPPResult(_DictBridge):
     boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
     # open_z | open_z_metal); forces/stress read it to add the ESM contribution
     esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
+    # Converged Kohn-Sham potential + screened D, retained for the PAW COHP
+    # operator route (postscf.cohp): H~ = ⟨χ|Ĥ_PAW|χ⟩, which needs the exact
+    # potential the final H applied. Per-spin, real-space veff / atom-block D.
+    # Optional so old checkpoints (which never stored them) still load; a
+    # result without them falls back to the eigenvalue route.
+    v_eff: list[torch.Tensor] | None = None  # per-spin real-space effective potential
+    dscr: list[torch.Tensor] | None = None   # per-spin screened D (dij + aug + one-center)
 
     _conditional_keys = frozenset(
         {"hub_occ", "hub_sites", "rho_spin", "mag_total", "mag_abs", "newton"})
+    # v_eff/dscr are heavy operator-route intermediates, not part of the legacy
+    # dict shape — keep them out of the dict view and checkpoint (like recorder).
+    _hidden_keys = frozenset({"recorder", "v_eff", "dscr"})
 
 
 @dataclass

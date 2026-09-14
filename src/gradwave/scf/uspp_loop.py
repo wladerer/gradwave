@@ -2097,6 +2097,18 @@ def scf_uspp(
     # the final return every element is a real Tensor, not the seed-compatible
     # `Tensor | None` the warm-start-carrying `coeffs` variable is typed for.
     coeffs_final = cast("list[list[torch.Tensor]]", coeffs)
+    # Retain the converged potential + screened D for the PAW COHP operator
+    # route (postscf.cohp). Recompute once from the returned (density, becsum)
+    # pair via the SAME assembly the SCF iterated with, so what COHP applies is
+    # bit-for-bit the converged H_PAW. Cheap (one potential build) relative to
+    # the whole SCF, and done before the dist-gather rebinds `system`, so it
+    # uses ops.system (global grid/atom tables — the k-sharding doesn't touch
+    # the density-side potential or the per-atom D).
+    v_eff_final, dscr_final, _e_onec_final = uspp_potentials_dscr(
+        ops.system, ops.xc, rho_s, rho_ij_final, ops.vloc_r, ops.phase_pos,
+        ops.onec if ops.is_paw else None,
+        boundary=ops.boundary, esm_bias=ops.esm_bias, tau_s=tau_state,
+    )
     if dist_ctx is not None:
         from gradwave.distributed import gather_list_cat
 
@@ -2144,4 +2156,6 @@ def scf_uspp(
         recorder=recorder,
         boundary=boundary,
         esm_bias=esm_bias,
+        v_eff=v_eff_final,
+        dscr=dscr_final,
     )
