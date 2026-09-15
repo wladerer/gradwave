@@ -401,7 +401,7 @@ def _energy_strained_fr(
     xc: NoncollinearXC,
     eps: torch.Tensor,
     *,
-    rho=None, coeffs=None, spheres=None,
+    rho=None, coeffs=None, spheres=None, m=None, occ=None,
     manifolds: list[HubbardManifold] | None = None,
 ) -> torch.Tensor:
     """KS energy vs strain for a fully-relativistic (spin-orbit) spinor result.
@@ -432,13 +432,18 @@ def _energy_strained_fr(
     shape = grid.shape
 
     rho = res.rho.detach() if rho is None else rho  # total ρ↑+ρ↓
-    m_vec = res.m.detach()  # magnetization (3, *grid)
+    # m⃗ override (force-theorem MAE-strain path: the rigidly-rotated frozen
+    # magnetization for a trial axis). |m| is preserved by the rotation, so the
+    # locally-collinear E_xc is unchanged — the anisotropy enters only through
+    # the coeffs/SOC term below, exactly as in postscf.mae.
+    m_vec = res.m.detach() if m is None else m  # magnetization (3, *grid)
     spheres = system.spheres if spheres is None else spheres
     if coeffs is None:
         assert res.coeffs is not None, "res carries no spinor coefficients"
         coeffs = res.coeffs.detach()  # (nk,nb,2·npw_max)
-    assert res.occupations is not None
-    occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
+    if occ is None:
+        assert res.occupations is not None
+        occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
     kw = system.kweights
 
     _f_map, a_e, b_e, omega0, omega, pos_e = strain_cell(
