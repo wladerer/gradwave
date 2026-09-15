@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from gradwave.api._common import (
     _DEFAULT_MIXING_HISTORY,
-    SPIN_XC_REGISTRY,
     XC_REGISTRY,
     _mixing_scheme,
+    _resolve_kerker,
+    build_xc,
     effective_smearing_type,
 )
 from gradwave.api.system import (
@@ -159,8 +160,7 @@ def _run_scf(
 
         start_from = as_start_from(load_checkpoint(inp.restart))
 
-    kerker = inp.scf.mixing.kerker
-    kerker = None if kerker == "auto" else bool(kerker)
+    kerker = _resolve_kerker(inp)
     # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
     # `hubbard=` kwarg — a runtime input, so it stays a flat argument); the
     # convergence aids ride in the HubbardOptions group. Defaults (β=1.0, ramp
@@ -261,10 +261,12 @@ def _run_scf_noncollinear(
     from a checkpoint's m⃗ field), and returns the NCResult."""
     import torch
 
-    from gradwave.core.xc.noncollinear import NoncollinearXC
     from gradwave.scf.noncollinear import scf_noncollinear
 
-    xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
+    # _run_scf routes here only when inp.noncollinear is True, so build_xc
+    # returns the NoncollinearXC-wrapped spin functional (the same object this
+    # branch built inline before) — the single home for the spinor XC build.
+    xc = build_xc(inp)
 
     if inp.nonmagnetic:
         # spin-orbit only: pin m⃗ ≡ 0 (no seed, no spurious moment)
@@ -343,8 +345,7 @@ def _run_scf_hybrid(
         start_from = as_start_from(load_checkpoint(inp.restart))
 
     hy = inp.hybrid
-    kerker = inp.scf.mixing.kerker
-    kerker = None if kerker == "auto" else bool(kerker)
+    kerker = _resolve_kerker(inp)
     omega = hy.omega if hy.mode != "full" else None
     # the uspp guard above rules out USPPSystem; hybrid_scf is norm-conserving only.
     return hybrid_scf(

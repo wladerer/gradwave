@@ -6,9 +6,16 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from gradwave.api._common import _DEFAULT_MIXING_HISTORY, XC_REGISTRY
+from gradwave.api._common import _DEFAULT_MIXING_HISTORY, resolve_n_workers
 from gradwave.api.dispersion import _compute_dispersion
-from gradwave.api.system import _as_paws, _as_upfs, _is_uspp, _species_upfs, _spin_setup
+from gradwave.api.system import (
+    _as_paws,
+    _as_upfs,
+    _is_uspp,
+    _species_upfs,
+    _worker_setup,
+    _xc_and_mags,
+)
 from gradwave.core.xc.base import XCFunctional
 from gradwave.inputs import Input
 
@@ -94,13 +101,8 @@ def _phonon_force(res: Any, xc: Any, uspp: bool) -> Any:
 def _phonon_rebuild(inp: Input) -> tuple[Any, bool, Any, Any]:
     """Reconstruct ``(upfs, uspp, xc, mags)`` from ``inp`` inside a worker,
     mirroring run_phonons' setup (path-cached upf load, nspin xc/mags)."""
-    _species, upfs, _soa = _species_upfs(inp)
-    uspp = _is_uspp(upfs)
-    if inp.nspin == 2:
-        xc, mags = _spin_setup(inp)
-    else:
-        xc, mags = XC_REGISTRY[inp.xc](), None
-    return upfs, uspp, xc, mags
+    s = _worker_setup(inp)
+    return s.upfs, s.uspp, s.xc, s.mags
 
 
 class _PhononSpoke(NamedTuple):
@@ -137,15 +139,11 @@ def _phonons_fc_parallel(
 
     ``warm_start=False`` skips the reference checkpoint and cold-starts every
     displacement (the cold arm of the cold-vs-warm A/B)."""
-    import os
-    import tempfile
-
-    from gradwave.io.checkpoint import save_checkpoint
     from gradwave.postscf.phonons_supercell import (
         displacement_list,
         force_constants_from_forces,
     )
-    from gradwave.postscf.seedpool import map_spokes
+    from gradwave.postscf.seedpool import map_spokes, run_seedpool
 
     if not warm_start:
         # cold every displacement: no reference checkpoint to seed from
@@ -156,15 +154,12 @@ def _phonons_fc_parallel(
         return force_constants_from_forces(dict(out), scmap, h)
     ref = _phonon_run_scf(inp, scmap, ksuper, upfs, uspp, xc, mags,
                           scmap.positions_super.copy(), None)
-    with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
-        ckpt = os.path.join(td, "ref.ckpt")
-        save_checkpoint(ref, ckpt)
-        spokes = [_PhononSpoke(inp, scmap, ksuper, pos, ckpt, (a, i, sign))
-                  for (a, i, sign, pos) in displacement_list(scmap, h)]
-        out = map_spokes(_phonon_spoke_worker, spokes,
-                         n_workers=n_workers, verbose=verbose)
-    force_map = dict(out)
-    return force_constants_from_forces(force_map, scmap, h)
+    out = run_seedpool(
+        ref,
+        lambda ckpt: [_PhononSpoke(inp, scmap, ksuper, pos, ckpt, (a, i, sign))
+                      for (a, i, sign, pos) in displacement_list(scmap, h)],
+        _phonon_spoke_worker, n_workers=n_workers, verbose=verbose)
+    return force_constants_from_forces(dict(out), scmap, h)
 
 
 def _ir_primitive_scf_fn(
@@ -344,11 +339,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
             "(the finite-displacement force fold uses the collinear force path)")
     _species, upfs, species_of_atom = _species_upfs(inp)
     uspp = _is_uspp(upfs)
-
-    if inp.nspin == 2:
-        xc, mags = _spin_setup(inp)
-    else:
-        xc, mags = XC_REGISTRY[inp.xc](), None
+    xc, mags = _xc_and_mags(inp)
     cell = np.asarray(inp.atoms.cell.array, dtype=float)
     positions = inp.atoms.get_positions()
     masses = inp.atoms.get_masses()  # primitive-atom masses [amu]
@@ -418,7 +409,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     # point-group displacement reduction (fewer SCFs, serial) are alternative ways
     # to cut the phonon cost and do not compose in v1 — parallel wins if both are
     # requested; the reduction (and the D3 fold above) apply on the serial path.
-    n_workers = 1 if inp.distributed else (inp.phonons.n_workers or 1)
+    n_workers = resolve_n_workers(inp, inp.phonons)
     if n_workers > 1:
         phi = _phonons_fc_parallel(inp, scmap, ksuper, upfs, uspp, xc, mags,
                                    h=inp.phonons.displacement,

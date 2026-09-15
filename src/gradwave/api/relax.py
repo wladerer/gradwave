@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from gradwave.api._common import XC_REGISTRY, _mixing_scheme
+from gradwave.api._common import XC_REGISTRY, _mixing_scheme, _resolve_kerker
 from gradwave.api.system import _is_uspp, _species_upfs
 from gradwave.constants import EV_A3_TO_GPA
 from gradwave.inputs import Input, InputError
@@ -94,8 +94,7 @@ def _build_relax_calc(
     ``scf_step_hook`` (nested engine only) prints the per-step header above it."""
     from gradwave.calculator import GradWave
 
-    kerker = inp.scf.mixing.kerker
-    kerker = None if kerker == "auto" else bool(kerker)
+    kerker = _resolve_kerker(inp)
     return GradWave(
         pulay_stress_correction=_resolve_pulay_correction(inp, verbose),
         ecut=inp.ecut,

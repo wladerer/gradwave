@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from gradwave.api._common import SPIN_XC_REGISTRY, time_reversal_ok
+from gradwave.api._common import SPIN_XC_REGISTRY, XC_REGISTRY, time_reversal_ok
 from gradwave.core.xc.spin import SpinXC
 from gradwave.inputs import Input
 
@@ -310,3 +311,46 @@ def _spin_setup(inp: Input) -> tuple[SpinXC, list[float]]:
     species = sorted(set(symbols))
     mags = [float((inp.start_mag or {}).get(s, 0.5)) for s in species]
     return xc, mags
+
+
+def _xc_and_mags(inp: Input) -> tuple[Any, list[float] | None]:
+    """The collinear ``(xc, start_mags)`` pair the phonon/EOS worker paths build:
+    the spin functional + per-species seed moments for ``nspin=2``, the
+    charge-only functional and no moments otherwise. The single home for the
+    ``if inp.nspin == 2: … else …`` branch ``run_phonons`` and ``_phonon_rebuild``
+    each inlined (noncollinear/spinor is out of scope for these tasks — use
+    ``_common.build_xc`` for the spinor branch)."""
+    if inp.nspin == 2:
+        return _spin_setup(inp)
+    return XC_REGISTRY[inp.xc](), None
+
+
+@dataclass
+class WorkerSetup:
+    """Everything a SeedPool worker (or the serial driver) re-derives from
+    ``inp`` before building a system: the loaded pseudos, the NC-vs-USPP flag,
+    the per-atom species index, whether the pseudos are fully relativistic
+    (j-resolved betas), and the collinear ``(xc, mags)`` pair. A superset so the
+    three drivers share one derivation; each consumes the fields it needs (eos
+    ignores ``xc``/``mags``, elastic overrides ``xc`` with ``build_xc`` for its
+    spinor stress path and reads ``is_fr``, phonons uses ``xc``/``mags``)."""
+
+    upfs: list[UPFData | PAWData]
+    uspp: bool
+    species_of_atom: list[int]
+    is_fr: bool
+    xc: Any
+    mags: list[float] | None
+
+
+def _worker_setup(inp: Input) -> WorkerSetup:
+    """Build the shared :class:`WorkerSetup` from ``inp`` — the ``_species_upfs``
+    + ``_is_uspp`` + fully-relativistic probe + collinear ``_xc_and_mags``
+    derivation the eos/elastic/phonon rebuild helpers each duplicated."""
+    _species, upfs, species_of_atom = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    is_fr = any(b.j is not None for u in upfs for b in u.betas)
+    xc, mags = _xc_and_mags(inp)
+    return WorkerSetup(
+        upfs=upfs, uspp=uspp, species_of_atom=species_of_atom,
+        is_fr=is_fr, xc=xc, mags=mags)

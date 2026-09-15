@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from gradwave.api._common import resolve_n_workers
 from gradwave.api.scf import run_scf
 from gradwave.api.system import (
     _fft_grid,
     _is_uspp,
     _species_upfs,
+    _worker_setup,
     build_scaled_system,
 )
 from gradwave.inputs import Input
@@ -24,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 # --- eos (volume spokes) ---------------------------------------------------
 def _eos_rebuild(inp: Input) -> tuple[Any, bool, Any]:
-    _species, upfs, soa = _species_upfs(inp)
-    return upfs, _is_uspp(upfs), soa
+    s = _worker_setup(inp)
+    return s.upfs, s.uspp, s.species_of_atom
 
 
 def _eos_scaled(
@@ -145,7 +147,7 @@ def run_eos(
     # SeedPool routes the volumes through worker processes; forced serial under
     # `distributed` (that path already shards k across ranks — the two
     # parallelisms do not compose in v1).
-    n_workers = 1 if inp.distributed else (inp.eos.n_workers or 1)
+    n_workers = resolve_n_workers(inp, inp.eos)
 
     def _eos_print(s: float, vol: float, e: float, conv: bool) -> None:
         if verbose:
@@ -157,11 +159,7 @@ def run_eos(
         # reference = the volume nearest 1.0 (cheapest cold start); every other
         # volume warm-starts from ITS checkpoint (a shared seed, not the serial
         # neighbour chain), so E(V) matches the serial fit to SCF tolerance.
-        import os
-        import tempfile
-
-        from gradwave.io.checkpoint import save_checkpoint
-        from gradwave.postscf.seedpool import map_spokes
+        from gradwave.postscf.seedpool import run_seedpool
 
         ref_idx = int(np.argmin([abs(s - 1.0) for s in scales]))
         ref_sys, ref_cell = _build_at(scales[ref_idx], fixed)
@@ -175,13 +173,11 @@ def run_eos(
         energies[ref_idx] = float(getattr(ref.energies, ekind))
         converged[ref_idx] = bool(ref.converged)
         niters[ref_idx] = int(getattr(ref, "n_iter", 0))
-        with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
-            ckpt = os.path.join(td, "ref.ckpt")
-            save_checkpoint(ref, ckpt)
-            spokes = [_EosSpoke(inp, s, fixed, ckpt, i, inp.eos.warm_start)
-                      for i, s in enumerate(scales) if i != ref_idx]
-            out = map_spokes(_eos_spoke_worker, spokes,
-                             n_workers=n_workers, verbose=verbose)
+        out = run_seedpool(
+            ref,
+            lambda ckpt: [_EosSpoke(inp, s, fixed, ckpt, i, inp.eos.warm_start)
+                          for i, s in enumerate(scales) if i != ref_idx],
+            _eos_spoke_worker, n_workers=n_workers, verbose=verbose)
         for idx, vol, e, conv, nit, appl in out:
             volumes[idx] = vol
             energies[idx] = e

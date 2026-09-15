@@ -79,6 +79,25 @@ def _mixing_scheme(inp: Input) -> str | None:
     return None if scheme == "auto" else scheme
 
 
+def _resolve_kerker(inp: Input) -> bool | None:
+    """The Kerker toggle the api forwards to the SCF drivers: the ``auto``
+    sentinel maps to None (each mixer picks its own evidence-backed default),
+    an explicit truthy/falsy value passes through as a bool. The single home for
+    the resolution run_scf, the hybrid SCF and the relax calculator build each
+    inlined."""
+    k = inp.scf.mixing.kerker
+    return None if k == "auto" else bool(k)
+
+
+def resolve_n_workers(inp: Input, block: Any) -> int:
+    """SeedPool worker count for a hub-and-spoke task (eos/elastic/phonons):
+    forced serial (1) under ``distributed`` — that path already shards k across
+    ranks and the two parallelisms do not compose in v1 — otherwise the task
+    block's ``n_workers`` (None → 1). ``block`` is the per-task params dataclass
+    (``inp.eos``/``inp.elastic``/``inp.phonons``)."""
+    return 1 if inp.distributed else (block.n_workers or 1)
+
+
 def _get(res: SCFLike, key: str, default: Any = None) -> Any:
     """Attribute read with a default: every SCF driver returns a result
     dataclass, but the field sets differ (e.g. NCResult has no nspin)."""
