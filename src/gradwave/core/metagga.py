@@ -34,20 +34,14 @@ from __future__ import annotations
 
 import torch
 
-from gradwave.core.batch import BatchedK, box_to_sphere_b, g_to_r_b
+from gradwave.core.batch import (
+    BatchedK,
+    _dense_band_chunk,
+    box_to_sphere_b,
+    g_to_r_b,
+)
 from gradwave.core.fftbox import r_to_g
 from gradwave.dtypes import CDTYPE
-
-# GPU dense-grid temporary budget [bytes]; matches core.batch. The τ paths hold
-# a handful of (nk, nb, n_grid) boxes at once, so bands are chunked to bound the
-# peak the same way density_b/BatchedHamiltonian.apply do.
-_GPU_DENSE_BUDGET_BYTES = 4e8
-
-
-def _band_chunk(nk: int, n: int, elem_bytes: int, device) -> int:
-    if device.type != "cuda":
-        return 1_000_000
-    return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * n * max(nk, 1))))
 
 
 def tau_b(
@@ -67,8 +61,7 @@ def tau_b(
     """
     nk, nb, _ = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
-    chunk = _band_chunk(nk, n, coeffs.element_size(), coeffs.device) if \
-        coeffs.device.type == "cuda" else nb
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
     w = kweights[:, None] * occ
     kpg = bk.kpg  # (nk, npw_max, 3), Å⁻¹, zero in padding
     tau: torch.Tensor | None = None
@@ -123,8 +116,7 @@ def spinor_tau_matrix_b(
     """
     nk, nb, _ = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
-    chunk = _band_chunk(nk, n, coeffs.element_size(), coeffs.device) if \
-        coeffs.device.type == "cuda" else nb
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
     w = kweights[:, None] * occ
     kpg = bk.kpg  # (nk, npw_max, 3), Å⁻¹, zero in padding
     tau_uu: torch.Tensor | None = None
@@ -189,8 +181,7 @@ def spinor_metagga_tau_operator(
     m_uu = (v0_r + vvec_r[2]).to(c.real.dtype)
     m_dd = (v0_r - vvec_r[2]).to(c.real.dtype)
     m_ud = torch.complex(vvec_r[0], -vvec_r[1]).to(c.dtype)  # ⟨↑|M|↓⟩
-    chunk = _band_chunk(nk, n, c.element_size(), c.device) if \
-        c.device.type == "cuda" else nb
+    chunk = _dense_band_chunk(n, nk, c.device, c.element_size())
     mask = bk.mask[:, None, :]
     out = torch.zeros_like(c)
     for lo in range(0, nb, chunk):
@@ -229,8 +220,7 @@ def metagga_tau_operator(
     n = shape[0] * shape[1] * shape[2]
     kpg = bk.kpg
     v = v_tau_r.to(c.real.dtype)
-    chunk = _band_chunk(nk, n, c.element_size(), c.device) if \
-        c.device.type == "cuda" else nb
+    chunk = _dense_band_chunk(n, nk, c.device, c.element_size())
     out = torch.zeros_like(c)
     for lo in range(0, nb, chunk):
         hi = min(lo + chunk, nb)
