@@ -97,6 +97,7 @@ from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import GSphere, build_gsphere, gmax_from_ecut
 from gradwave.postscf._response import (
+    _p_c,
     cg_sternheimer,
     dyson_fixed_point,
     insulator_window,
@@ -372,8 +373,7 @@ def _apply_chi0_spin(res: SCFResult, w_r: list[torch.Tensor]) -> list[torch.Tens
         psi_r = g_to_r_b(c_occ, bk, grid.shape)
 
         def p_c(x, c_occ=c_occ):
-            ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
-            return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+            return _p_c(c_occ, x)
 
         w_sp = w_r[sp].to(psi_r.dtype)
         rhs = -p_c(box_to_sphere_b(psi_r * w_sp, bk))

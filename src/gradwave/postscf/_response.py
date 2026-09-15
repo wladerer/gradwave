@@ -25,12 +25,18 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import torch
 
 from gradwave.constants import E2
-from gradwave.core.batch import BatchedHamiltonian, BatchedK, projectors_b
+from gradwave.core.batch import (
+    BatchedHamiltonian,
+    BatchedK,
+    _miller_from_flat,
+    _toeplitz_diff_index,
+    projectors_b,
+)
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.xc.base import XCFunctional, xc_eager
@@ -39,6 +45,13 @@ from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import FFTGrid
 from gradwave.solvers.precond import teter_b
+
+if TYPE_CHECKING:
+    # TYPE_CHECKING-only: `_k_hxc_spin`'s `res` parameter is a
+    # ``scf.loop.SCFResult``, but importing it at runtime would be circular
+    # (``scf`` imports this module). No actual edge exists — same carve-out
+    # pattern as ``core.hubbard -> scf.loop``.
+    from gradwave.scf.loop import SCFResult
 
 
 class _AppliesH(Protocol):
@@ -155,6 +168,31 @@ def fxc_hvp_spin(xc: SpinXC, ru0: torch.Tensor, rd0: torch.Tensor,
         fu, fd = torch.autograd.grad(inner, (ru, rd))
     scale = grid.n_points / grid.volume
     return fu * scale, fd * scale
+
+
+def _k_hxc_spin(res: SCFResult, xc: SpinXC, dru: torch.Tensor,
+                drd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on the total Δρ (G=0
+    excluded) plus the spin f_xc Hessian-vector product at the SCF spin
+    densities (NLCC core split half/half per channel, exactly as the SCF
+    potential was built). Shared by the dielectric and Hubbard-U response
+    paths; only ever called for a computed nspin=2 result, so ``rho_spin`` is
+    always set."""
+    core = res.system.rho_core
+    cu2 = 0.0 if core is None else 0.5 * core
+    kh = hartree_kernel(res.system.grid, dru + drd)
+    assert res.rho_spin is not None
+    fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
+                          res.system.grid, dru, drd)
+    return kh + fu, kh + fd
+
+
+def _p_c(c_occ: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Conduction-space projector P_c x = x − Σ_occ |c⟩⟨c|x⟩ in the
+    orthonormal (S = I) plane-wave metric, batched over k. ``c_occ`` is
+    (nk, nocc, npw), ``x`` is (nk, nb, npw)."""
+    ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
+    return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
 
 
 def fxc_hvp_noncollinear_nonmagnetic(xc: NoncollinearXC, rho0: torch.Tensor, grid: FFTGrid,
@@ -814,9 +852,6 @@ class DenseSternheimerSolver:
         self.positions = positions
         self.kchunk = int(kchunk)
         nk, m = bk.mask.shape
-        n1, n2, n3 = shape
-        s12 = n2 * n3
-        nbox = torch.tensor(shape, device=bk.flat_idx.device)
         p_all = projectors_b(bk, positions).detach()
         dij = bk.dij_full.to(CDTYPE)
         vhat = r_to_g(v_eff_r.to(CDTYPE)).reshape(-1)
@@ -825,13 +860,10 @@ class DenseSternheimerSolver:
         for lo in range(0, nk, self.kchunk):
             hi = min(lo + self.kchunk, nk)
             # Miller triples back from the box-flat index; wrapped pairwise
-            # difference -> the Toeplitz local matrix (BatchedHamiltonian's
-            # _build_toeplitz_index logic, chunked over k)
+            # difference -> the Toeplitz local matrix. Chunked over k to bound
+            # peak memory (shared index builder: core.batch._toeplitz_diff_index).
             flat = bk.flat_idx[lo:hi].to(torch.long)
-            g = torch.stack(
-                [flat // s12, (flat % s12) // n3, flat % n3], dim=-1)
-            diff = (g[:, :, None, :] - g[:, None, :, :]) % nbox
-            hmat = vhat[diff[..., 0] * s12 + diff[..., 1] * n3 + diff[..., 2]]
+            hmat = vhat[_toeplitz_diff_index(_miller_from_flat(flat, shape), shape)]
             mask = bk.mask[lo:hi]
             hmat = hmat * (mask[:, :, None] & mask[:, None, :])
             if p_all.shape[1]:

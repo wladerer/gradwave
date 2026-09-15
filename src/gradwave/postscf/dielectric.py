@@ -67,10 +67,11 @@ from gradwave.grids import FFTGrid
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     ResolventSternheimer,
+    _k_hxc_spin,
+    _p_c,
     cg_sternheimer,
     fxc_hvp,
     fxc_hvp_noncollinear_nonmagnetic,
-    fxc_hvp_spin,
     hartree_kernel,
     insulator_window,
     pad_coeffs,
@@ -345,8 +346,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
             return cg_sternheimer(h, bk, c_occ, eps_occ, rhs, x0, shift, tol=cg_tol)
 
     def p_c(x):
-        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+        return _p_c(c_occ, x)
 
     # ξ^α = P_c r_α ψ via Sternheimer with the ∂H/∂k commutator RHS
     xi = []
@@ -547,23 +547,6 @@ def _k_hxc(res: SCFResult, xc: XCFunctional, drho: torch.Tensor) -> torch.Tensor
     return hartree_kernel(grid, drho) + fxc_hvp(xc, rho_xc, grid, drho)
 
 
-def _k_hxc_spin(res: SCFResult, xc: SpinXC, dru: torch.Tensor,
-                drd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on the total Δρ (G=0
-    excluded) plus the spin f_xc Hessian-vector product at the SCF spin densities
-    (NLCC core split half/half per channel, exactly as the SCF potential built
-    it). The shared postscf._response primitives, matching hubbard_u._k_hxc_spin."""
-    core = res.system.rho_core
-    cu2 = 0.0 if core is None else 0.5 * core
-    kh = hartree_kernel(res.system.grid, dru + drd)
-    # _k_hxc_spin is only called from _dielectric_born_spin's nspin=2 path,
-    # where the NC SCF always sets rho_spin (see results.py).
-    assert res.rho_spin is not None
-    fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
-                          res.system.grid, dru, drd)
-    return kh + fu, kh + fd
-
-
 @torch.no_grad()
 def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer_tol, max_outer,
                           history, verbose) -> dict[str, Any]:
@@ -597,8 +580,7 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
         shift.append(sternheimer_shift(eps_occ[sp]))
 
     def p_c(x, sp):
-        ov = torch.einsum("kng,kbg->kbn", c_occ[sp].conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, c_occ[sp])
+        return _p_c(c_occ[sp], x)
 
     # ξ^α_σ = P_c r_α ψ_σ per spin channel (∂H/∂k is spin-independent)
     xi_raw: list[list[torch.Tensor | None]] = [[None, None, None] for _ in range(2)]
@@ -849,8 +831,7 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
     bk2 = SimpleNamespace(t=torch.cat([bk.t, bk.t], dim=-1))
 
     def p_c(x):
-        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+        return _p_c(c_occ, x)
 
     col_meta, lmax = so_projector_channels(system)
     tabs = [RadialTables(u, device=dev) for u in system.upfs]

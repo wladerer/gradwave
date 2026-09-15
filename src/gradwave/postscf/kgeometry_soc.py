@@ -60,6 +60,7 @@ from gradwave.postscf.kgeometry import (
     _Q2_ZERO,
     _beta_channels,
     _BetaChannel,
+    _k_cart,
     _toeplitz_index,
 )
 from gradwave.postscf.kgeometry_topo import (
@@ -189,12 +190,7 @@ class BlochHKSpinor:
 
     def k_cart(self, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
         """Cartesian k [Å⁻¹] from fractional coordinates (stays on the graph)."""
-        kf = (
-            k_frac.to(RDTYPE)
-            if isinstance(k_frac, Tensor)
-            else torch.as_tensor(np.asarray(k_frac, dtype=float), dtype=RDTYPE)
-        )
-        return kf @ self.b
+        return _k_cart(self.b, k_frac)
 
     def spinor_projectors(self, k_cart: Tensor) -> Tensor:
         """j-resolved KB projectors q (nproj_so, 2·npw), differentiable in k."""
