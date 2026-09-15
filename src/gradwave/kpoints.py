@@ -13,6 +13,8 @@ import warnings
 
 import numpy as np
 
+from gradwave.grids import reciprocal_cell
+
 
 def _axis_vacuum_gaps(
     cell: np.ndarray, positions: np.ndarray
@@ -76,7 +78,7 @@ def slab_kmesh(
     if kspacing <= 0.0:
         raise ValueError(f"kspacing must be positive, got {kspacing}")
     cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
-    recip = 2.0 * np.pi * np.linalg.inv(cell).T  # rows b_i
+    recip = reciprocal_cell(cell)  # rows b_i
     blen = np.linalg.norm(recip, axis=1)
     mesh = [max(1, int(np.ceil(b / kspacing))) for b in blen]
 

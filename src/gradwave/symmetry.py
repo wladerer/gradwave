@@ -35,6 +35,8 @@ import spglib
 import torch
 from spglib import SpgCell
 
+from gradwave.grids import reciprocal_cell
+
 
 @dataclass(frozen=True)
 class SpaceGroup:
@@ -526,7 +528,7 @@ class QFieldSymmetrizer:
         ).reshape(-1, 3)
         # q-shifted band-limit: {|q+G| ≤ G_cut(density)}, the set the little group
         # preserves. G_cut² is the max |G|² carried by the ordinary density mask.
-        b = 2.0 * np.pi * np.linalg.inv(np.asarray(cell, float)).T   # reciprocal rows
+        b = reciprocal_cell(np.asarray(cell, float))   # reciprocal rows
         g_cart = millers @ b
         q_cart = q @ b
         g2_flat = g2.reshape(-1).cpu().numpy()

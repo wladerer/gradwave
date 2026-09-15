@@ -23,6 +23,25 @@ import numpy as np
 from scipy.special import lpmv, roots_legendre
 
 
+def gauss_legendre_sphere(n_cos: int, n_phi: int) -> tuple[np.ndarray, np.ndarray]:
+    """Gauss–Legendre(cosθ) × uniform-φ sphere quadrature.
+
+    Returns ``(dirs, w)`` with ``dirs`` the (n_cos·n_phi, 3) Cartesian unit
+    directions and ``w`` the matching (n_cos·n_phi,) weights (Gauss–Legendre
+    weight in cosθ times the uniform 2π/n_phi step), so ``Σ w·f ≈ ∫ f dΩ`` and
+    is exact for band-limited integrands (degree ≤ 2·n_cos−1 in cosθ). numpy
+    only; the shared node/weight layout for the Gaunt table, becsum
+    symmetrization, and the one-center angular grid.
+    """
+    z, wz = roots_legendre(n_cos)
+    phi = np.arange(n_phi) * (2.0 * np.pi / n_phi)
+    zz, pp = np.meshgrid(z, phi, indexing="ij")
+    st = np.sqrt(1.0 - zz**2)
+    dirs = np.stack([st * np.cos(pp), st * np.sin(pp), zz], axis=-1).reshape(-1, 3)
+    w = (wz[:, None] * np.full(n_phi, 2.0 * np.pi / n_phi)).reshape(-1)
+    return dirs, w
+
+
 def _norm_lm(l: int, m: int) -> float:
     from math import factorial, pi, sqrt
 
@@ -67,15 +86,10 @@ def real_gaunt_table(lmax_beta: int) -> np.ndarray:
     lmax_aug = 2 * lmax_beta
     deg = 3 * lmax_beta + 2
     nct = deg + 2
-    x, wx = roots_legendre(nct)
     nphi = 2 * (3 * lmax_beta) + 4
-    phi = np.arange(nphi) * (2.0 * np.pi / nphi)
-    ct, ph = np.meshgrid(x, phi, indexing="ij")
-    st = np.sqrt(1.0 - ct**2)
-    dirs = np.stack([st * np.cos(ph), st * np.sin(ph), ct], axis=-1)
-    w = (wx[:, None] * np.full(nphi, 2.0 * np.pi / nphi)[None, :]).reshape(-1)
+    dirs, w = gauss_legendre_sphere(nct, nphi)
 
-    y_all = ylm_np(lmax_aug, dirs.reshape(-1, 3))  # (npt, (2lb+1)²)
+    y_all = ylm_np(lmax_aug, dirs)  # (npt, (2lb+1)²)
     nb = (lmax_beta + 1) ** 2
     yb = y_all[:, :nb]
     return np.einsum("pL,pi,pj,p->Lij", y_all, yb, yb, w)

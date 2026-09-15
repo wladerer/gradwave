@@ -15,26 +15,14 @@ formula conventions to get wrong. QE's PAW_symmetrize does the same job.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
 
-from gradwave.core.gaunt import ylm_np
+from gradwave.core.gaunt import gauss_legendre_sphere, ylm_np
 
 
 def _sphere_quad(lmax: int):
-    from scipy.special import roots_legendre
-
-    n = lmax + 2
-    z, wz = roots_legendre(n)
-    nphi = 2 * lmax + 3
-    phi = np.arange(nphi) * (2.0 * math.pi / nphi)
-    zz, pp = np.meshgrid(z, phi, indexing="ij")
-    st = np.sqrt(1.0 - zz**2)
-    dirs = np.stack([st * np.cos(pp), st * np.sin(pp), zz], -1).reshape(-1, 3)
-    w = (wz[:, None] * np.full(nphi, 2.0 * math.pi / nphi)).reshape(-1)
-    return dirs, w
+    return gauss_legendre_sphere(lmax + 2, 2 * lmax + 3)
 
 
 def ylm_rotation_matrices(sg, cell: np.ndarray, lmax: int) -> list[list[torch.Tensor]]:
