@@ -26,9 +26,9 @@ from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.mae import (
+    _fband_strained,
     _frozen_oneshot,
     force_theorem_mae,
-    mae_strain_gradient,
     mae_strained,
 )
 from gradwave.pseudo.upf import parse_upf
@@ -72,46 +72,56 @@ def main():
     assert res.converged, "SCF not converged"
     print(f"SCF converged in {res.n_iter} it ({time.time()-t0:.0f}s)", flush=True)
 
-    # (1) value cross-check vs the band-energy force theorem
+    # reference band energies from the established force theorem (no fold)
     ft = force_theorem_mae(res, xc, [[0, 0, 1.0], [1.0, 0, 0]], verbose=False)
-    mae_ft = float(ft.mae[1]) * 1000.0
-    mae_val, grad = mae_strain_gradient(res, xc, hard_dir=(1, 0, 0),
-                                        easy_dir=(0, 0, 1))
-    mae_mev = float(mae_val) * 1000.0
-    print(f"\nMAE value  force-theorem (band E) = {mae_ft:+.4f} meV", flush=True)
-    print(f"MAE value  mae_strained  (total E) = {mae_mev:+.4f} meV", flush=True)
-
-    # (2) gradient check: analytic dMAE/dη vs central FD, SAME frozen orbitals
     ref = res.mag_vec / np.linalg.norm(res.mag_vec)
     ref_t = torch.as_tensor(ref, dtype=RDTYPE)
     prep_h = _frozen_oneshot(res, xc, (1, 0, 0), ref_t, smearing="gaussian",
                              width=0.1, diago_tol=1e-10)
     prep_e = _frozen_oneshot(res, xc, (0, 0, 1), ref_t, smearing="gaussian",
                              width=0.1, diago_tol=1e-10)
-    tetra = torch.tensor([[-1.0, 0, 0], [0, -1.0, 0], [0, 0, 2.0]], dtype=RDTYPE)
 
+    # (1) per-direction F_band(ε=0) vs force_theorem_mae — validates the
+    # band-energy potential-expectation assembly directly (tightest gate).
+    eps0 = torch.zeros(3, 3, dtype=RDTYPE)
+    fb_h = float(_fband_strained(res, xc, prep_h, eps0))
+    fb_e = float(_fband_strained(res, xc, prep_e, eps0))
+    ft_h, ft_e = float(ft.band_free_energies[1]), float(ft.band_free_energies[0])
+    d_h, d_e = abs(fb_h - ft_h), abs(fb_e - ft_e)
+    print(f"\nF_band[hard]  mine={fb_h:+.6f}  ft={ft_h:+.6f}  Δ={d_h:.2e} eV",
+          flush=True)
+    print(f"F_band[easy]  mine={fb_e:+.6f}  ft={ft_e:+.6f}  Δ={d_e:.2e} eV",
+          flush=True)
+    mae_mine = (fb_h - fb_e) * 1000.0
+    mae_ft = float(ft.mae[1]) * 1000.0
+    print(f"MAE  mine={mae_mine:+.4f} meV   ft={mae_ft:+.4f} meV", flush=True)
+    value_ok = d_h < 1e-4 and d_e < 1e-4
+
+    # (2) gradient: analytic dMAE/dη vs central FD (SAME frozen orbitals),
+    # volume-conserving tetragonal strain ε = η·diag(-1,-1,2), c/a → c/a·(1+3η)
+    tetra = torch.tensor([[-1.0, 0, 0], [0, -1.0, 0], [0, 0, 2.0]], dtype=RDTYPE)
     eps = torch.zeros(3, 3, dtype=RDTYPE, requires_grad=True)
     mae0 = mae_strained(res, xc, prep_h, prep_e, eps)
     (g,) = torch.autograd.grad(mae0, eps)
     g = 0.5 * (g + g.T)
-    dmae_deta_ag = float(-g[0, 0] - g[1, 1] + 2 * g[2, 2]) * 1000.0  # meV/η
+    dmae_deta_ag = float(-g[0, 0] - g[1, 1] + 2 * g[2, 2]) * 1000.0   # meV/η
 
     def E(eta):
         return float(mae_strained(res, xc, prep_h, prep_e,
                                   eta * tetra)) * 1000.0
     dmae_deta_fd = (E(DELTA) - E(-DELTA)) / (2 * DELTA)               # meV/η
-
     rel = abs(dmae_deta_ag - dmae_deta_fd) / (abs(dmae_deta_fd) + 1e-12)
     print(f"\ndMAE/dη  autograd = {dmae_deta_ag:+.6f} meV", flush=True)
     print(f"dMAE/dη  central-FD = {dmae_deta_fd:+.6f} meV", flush=True)
     print(f"relative mismatch = {rel:.2e}", flush=True)
-    # η→c/a: c/a = (c/a)(1+3η) ⇒ dMAE/d(c/a) = (dMAE/dη)/(3·c0/a0)
     print(f"dMAE/d(c/a) = {dmae_deta_ag/(3*C0/A0):+.4f} meV  "
           f"(c/a = {C0/A0:.3f})", flush=True)
+    grad_ok = rel < 1e-4
 
-    ok = rel < 1e-4
-    print(f"\nGRADIENT_CHECK {'PASS' if ok else 'FAIL'} "
-          f"(rel {rel:.2e} < 1e-4)  total {time.time()-t0:.0f}s", flush=True)
+    ok = value_ok and grad_ok
+    print(f"\nVALUE_CHECK {'PASS' if value_ok else 'FAIL'}  "
+          f"GRADIENT_CHECK {'PASS' if grad_ok else 'FAIL'}  "
+          f"total {time.time()-t0:.0f}s", flush=True)
     print("MAE_GRAD_DONE", flush=True)
     sys.exit(0 if ok else 1)
 
