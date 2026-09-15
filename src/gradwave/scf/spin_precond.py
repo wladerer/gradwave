@@ -37,6 +37,7 @@ import torch
 
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE
+from gradwave.scf._woodbury import woodbury_apply, woodbury_factor
 
 if TYPE_CHECKING:
     from gradwave.distributed import DistKContext
@@ -50,20 +51,17 @@ class StonerSpinPrecond:
         """u_g: (r, ng) codensities ρ̂_α(G) on the density sphere.
         w_g: (r, ng) kernel-weighted codensities (K_mm ρ_α)^(G).
         cvals: (r,) w_k f'(ε_α) (negative). volume: Ω (the ⟨,⟩ factor)."""
-        d_inv = torch.diag(1.0 / (volume * cvals.to(CDTYPE)))
-        # A = D⁻¹ − W†U  (r × r); pairing ⟨a,b⟩ = Ω Σ_G â* b̂ carries Ω into D
-        a = d_inv - torch.einsum("ag,bg->ab", w_g.conj(), u_g)
         self._u = u_g
         self._w = w_g
         self.cvals = cvals
         self.volume = volume
-        self._a_lu = torch.linalg.lu_factor(a)
+        # A = diag(1/(Ω c)) − W†U (r × r); pairing ⟨a,b⟩ = Ω Σ_G â* b̂ carries Ω
+        # into the diagonal (see scf._woodbury).
+        self._a_lu = woodbury_factor(u_g, w_g, cvals, volume)
 
     def apply(self, r_m: torch.Tensor) -> torch.Tensor:
         """M⁻¹ r on one m-channel sphere vector."""
-        proj = torch.einsum("ag,g->a", self._w.conj(), r_m)
-        sol = torch.linalg.lu_solve(*self._a_lu, proj[:, None])[:, 0]
-        return r_m + torch.einsum("ag,a->g", self._u, sol)
+        return woodbury_apply(self._u, self._w, self._a_lu, r_m)
 
 
 def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,

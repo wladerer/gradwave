@@ -55,6 +55,7 @@ from gradwave.postscf._response import (
     divided_difference_weights,
     occupation_derivative,
 )
+from gradwave.scf._woodbury import woodbury_apply, woodbury_factor
 from gradwave.scf.implicit import apply_k_hxc
 from gradwave.scf.loop import SCFResult
 
@@ -90,17 +91,15 @@ class WoodburyPrecond:
         self._w = w_g
         self.cvals = cvals
         self.n_col = int(u_g.shape[0])
-        d_inv = torch.diag(1.0 / (volume * cvals.to(CDTYPE)))
-        a = d_inv - torch.einsum("ag,bg->ab", w_g.conj(), u_g)
-        self._a_lu = torch.linalg.lu_factor(a)
+        # A = diag(1/(Ω c)) − W†U (see scf._woodbury; identical algebra to
+        # StonerSpinPrecond, which its docstring already notes).
+        self._a_lu = woodbury_factor(u_g, w_g, cvals, volume)
         # telemetry
         self.n_calls = 0
 
     def _apply_updn(self, r: torch.Tensor) -> torch.Tensor:
         """(1 − M_ρ)⁻¹ r on the stacked (up,dn) sphere vector."""
-        proj = torch.einsum("ag,g->a", self._w.conj(), r)
-        sol = torch.linalg.lu_solve(*self._a_lu, proj[:, None])[:, 0]
-        return r + torch.einsum("ag,a->g", self._u, sol)
+        return woodbury_apply(self._u, self._w, self._a_lu, r)
 
     def __call__(self, r_grid: torch.Tensor) -> torch.Tensor:
         self.n_calls += 1
