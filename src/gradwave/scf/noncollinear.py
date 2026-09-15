@@ -58,6 +58,7 @@ from gradwave.grids import FFTGrid
 from gradwave.scf.common import (
     MP_CROSSOVER,
     adaptive_diago_tol,
+    assert_charge_conserved,
     convergence_gate,
     kernel_energy_metric_nc,
     make_spin_precond,
@@ -806,10 +807,7 @@ def scf_noncollinear(
         # electron each, N is fixed). On a converged run ρ is conserved to
         # ~1e-6 and this passes silently; a fire means real charge
         # non-conservation in the NC spinor path.
-        n_tot = float(rho_out.sum()) * vol / grid.n_points
-        if abs(n_tot - system.n_electrons) >= 1e-5:
-            raise ValueError(
-                f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
+        assert_charge_conserved(rho_out, system.n_electrons, vol, grid.n_points)
 
         # meta-GGA: rebuild the KE-density matrix (τ_0, τ⃗) from the NEW spinors
         # (consistent with rho_out/m_out) for the energy, and carry it to the

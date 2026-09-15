@@ -27,7 +27,7 @@ from gradwave.constants import RY_EV
 from gradwave.core import opcount
 from gradwave.core.batch import BatchedK
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.energies.esm import esm_energy, esm_mode_of, esm_potential
+from gradwave.core.energies.esm import esm_mode_of, esm_potential
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
@@ -46,7 +46,9 @@ from gradwave.scf.common import (
     MP_CROSSOVER,
     SCHEMES,
     adaptive_diago_tol,
+    add_esm_energy,
     assemble_pw_energies,
+    assert_charge_conserved,
     constant_mu_occupations,
     convergence_gate,
     fsm_smeared_occupations,
@@ -602,6 +604,34 @@ def vtau_spin_potential(xc, rho_up, rho_dn, tau_up, tau_dn, grid):
     vu = torch.zeros_like(tu) if vu is None else vu * scale
     vd = torch.zeros_like(td) if vd is None else vd * scale
     return vu, vd
+
+
+def collinear_vtau_fields(xc, rho_s, tau_s, rho_core, grid):
+    """Per-spin scaled v_τσ = ∂e_xc/∂τ_σ grid fields for the collinear meta-GGA
+    generalized-KS operator −½∇·(v_τσ∇ψ_σ), from the current (ρ, τ) with the NLCC
+    core folded in exactly as E_xc sees it: the full core for nspin=1, half/half
+    per channel for nspin=2. Returns ``None`` for a non-τ functional or an
+    unseeded τ (iteration 1 of a USPP cold start).
+
+    The k-INDEPENDENT half of the meta-GGA operator (pure grid autograd through
+    the functional); the k-streaming path computes it ONCE per SCF step and
+    rebuilds only the cheap per-chunk apply from it (``_metagga_ops_from_vtau``).
+    Shared by the NC (``scf``) and USPP/PAW
+    (``uspp_loop._uspp_vtau_fields``) collinear drivers, which differ only in
+    which density they call "total" — and those coincide (``rho_s[0]`` IS the
+    nspin=1 total). Lives here (not in ``scf.common``) because it composes the
+    ``vtau_potential``/``vtau_spin_potential`` helpers defined in this module;
+    ``uspp_loop`` already imports those from here, so this adds no new edge."""
+    if not xc.needs_tau or tau_s is None:
+        return None
+    if len(rho_s) == 1:
+        assert isinstance(xc, XCFunctional)
+        rho_for_xc = rho_s[0] if rho_core is None else rho_s[0] + rho_core
+        return [vtau_potential(xc, rho_for_xc, tau_s[0], grid)]
+    cu2 = None if rho_core is None else 0.5 * rho_core
+    r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
+    r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
+    return list(vtau_spin_potential(xc, r_u, r_d, tau_s[0], tau_s[1], grid))
 
 
 def local_potential_r(system: System, vloc_g: torch.Tensor | None = None) -> torch.Tensor:
@@ -1497,36 +1527,6 @@ def _bootstrap_tau(
     ]
 
 
-def _metagga_vtau(
-    xc: XCFunctional | SpinXC,
-    rho_s: list[torch.Tensor],
-    rho_tot: torch.Tensor,
-    tau_list: list[torch.Tensor] | None,
-    system: System,
-    nspin: int,
-    grid: FFTGrid,
-) -> list[torch.Tensor] | None:
-    """Per-spin scaled v_τσ = ∂e_xc/∂τ_σ grid fields from the current (ρ, τ), or
-    None for a non-τ functional. This is the k-INDEPENDENT half of the meta-GGA
-    operator (a pure grid autograd through the XC functional); it is split out so
-    the k-streaming path computes it ONCE per SCF step and rebuilds only the cheap
-    per-chunk apply from it (see _metagga_ops_from_vtau)."""
-    if not xc.needs_tau:
-        return None
-    # tau_list is bootstrapped/rebuilt in lockstep with xc.needs_tau by the
-    # caller (_bootstrap_tau before the loop, then the `if xc.needs_tau:`
-    # rebuild each iteration — see scf()) so it's never None here.
-    assert tau_list is not None
-    if nspin == 1:
-        assert isinstance(xc, XCFunctional)
-        rho_for_xc = rho_tot if system.rho_core is None else rho_tot + system.rho_core
-        return [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
-    cu2 = None if system.rho_core is None else 0.5 * system.rho_core
-    r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
-    r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
-    return list(vtau_spin_potential(xc, r_u, r_d, tau_list[0], tau_list[1], grid))
-
-
 def _metagga_ops_from_vtau(
     v_tau_s: list[torch.Tensor],
     bk: BatchedK,
@@ -1558,27 +1558,6 @@ def _metagga_ops_from_vtau(
                 lambda c, _v=v_tau_s[sp], _bk=bk, _sh=shape: metagga_tau_operator(c, _v, _bk, _sh)
             )
     return ops
-
-
-def _build_metagga_apply(
-    xc: XCFunctional | SpinXC,
-    rho_s: list[torch.Tensor],
-    rho_tot: torch.Tensor,
-    tau_list: list[torch.Tensor] | None,
-    system: System,
-    nspin: int,
-    bk: BatchedK,
-    grid: FFTGrid,
-) -> list[Callable[[torch.Tensor], torch.Tensor]] | None:
-    """Per-spin meta-GGA generalized-KS operator −½∇·(v_τσ∇ψ_σ), or None when the
-    functional is not τ-dependent. Thin composition of _metagga_vtau (the
-    k-independent v_τ fields) and _metagga_ops_from_vtau (the per-bk apply) — the
-    all-k path; the k-streaming path calls the two halves separately so v_τ is
-    computed once and only the apply is rebuilt per chunk."""
-    v_tau_s = _metagga_vtau(xc, rho_s, rho_tot, tau_list, system, nspin, grid)
-    if v_tau_s is None:
-        return None
-    return _metagga_ops_from_vtau(v_tau_s, bk, grid.shape, nspin)
 
 
 def _assemble_scf_energies(
@@ -1670,13 +1649,10 @@ def _assemble_scf_energies(
             e_ewald=e_ewald,
         )
         energies.fock = e_fock
-    esm_mode = esm_mode_of(boundary)
-    if esm_mode is not None:
-        # ΔE = open-minus-periodic electrostatic correction (both spins act on
-        # the total charge). Detached like the rest of this no_grad breakdown;
-        # the differentiable copy for forces is rebuilt in postscf/forces.py.
-        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
-                                  grid, mode=esm_mode, bias=esm_bias)
+    # ΔE = open-minus-periodic ESM electrostatic correction (both spins act on the
+    # total charge; detached breakdown, forces rebuild the differentiable copy).
+    add_esm_energy(energies, boundary, rho_tot_out, system.positions,
+                   system.charges, grid, esm_bias)
     return energies, coeffs_list_s
 
 
@@ -2454,7 +2430,7 @@ def scf(
             # per-bk apply (built below): the all-k path builds it once against the
             # full bk; k-streaming rebuilds only the cheap apply against each chunk's
             # reindexed bk (see _solve_bands_streamed).
-            v_tau_s = _metagga_vtau(xc, rho_s, rho_tot, tau_list, system, nspin, grid)
+            v_tau_s = collinear_vtau_fields(xc, rho_s, tau_list, system.rho_core, grid)
             metagga_apply_s = (
                 None
                 if v_tau_s is None or k_chunk_res is not None or k_par_res is not None
@@ -2613,11 +2589,8 @@ def scf(
             # there. On a normally converged run ρ is conserved to ~1e-6 and
             # this passes silently; a fire means real charge non-conservation.
             if target_mu is None:
-                n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-                if abs(n_tot - system.n_electrons) >= 1e-5:
-                    raise ValueError(
-                        f"charge not conserved: {n_tot:.8f} vs "
-                        f"{system.n_electrons}")
+                assert_charge_conserved(rho_tot_out, system.n_electrons, vol,
+                                        grid.n_points)
                 # spin cross-check (nspin=2): the density magnetization
                 # ∫(ρ↑−ρ↓) must match the occupation moment Σ w(f↑−f↓). A warn,
                 # not a raise (occupation vs density-grid discretization), and

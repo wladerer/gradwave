@@ -508,6 +508,35 @@ def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
     return occ_s, mu, ent
 
 
+def add_esm_energy(energies, boundary, rho_tot, positions, charges, grid,
+                   esm_bias):
+    """Add the ESM open-minus-periodic electrostatic energy ΔE to the (detached)
+    ``EnergyBreakdown`` when ``boundary`` selects an ESM mode; a no-op for a
+    periodic run. Both spins act on the total charge, so this takes the total
+    density; the differentiable copy for forces is rebuilt in ``postscf/forces.py``.
+    Shared by the collinear NC and USPP/PAW energy assemblies. Mutates and
+    returns ``energies``."""
+    from gradwave.core.energies.esm import esm_energy, esm_mode_of
+
+    mode = esm_mode_of(boundary)
+    if mode is not None:
+        energies.esm = esm_energy(rho_tot, positions, charges, grid, mode=mode,
+                                  bias=esm_bias)
+    return energies
+
+
+def assert_charge_conserved(rho_tot, n_electrons, vol, n_points, *, tol=1e-5):
+    """Integrate the total density (∫ρ = Σρ·Ω/N_grid) and raise if it drifts from
+    ``n_electrons`` by ≥ ``tol`` (default 1e-5). Returns the integrated count
+    ``n_tot`` for callers that reuse it (the collinear spin cross-check). The
+    guard shared verbatim by all four SCF drivers: a converged run conserves ρ to
+    ~1e-6, so a fire means real charge non-conservation, not mixer slop."""
+    n_tot = float(rho_tot.sum()) * vol / n_points
+    if abs(n_tot - n_electrons) >= tol:
+        raise ValueError(f"charge not conserved: {n_tot:.8f} vs {n_electrons}")
+    return n_tot
+
+
 def constant_mu_occupations(eigs_s, kweights, smearing, width, mu, nspin, device):
     """Occupations at a FIXED Fermi level µ (constant-potential / grand-canonical):
     the electron count N = Σ_k w_k Σ_n g·f((ε−µ)/σ) FLOATS with the eigenvalues,

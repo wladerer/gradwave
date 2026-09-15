@@ -47,6 +47,7 @@ from gradwave.core.xc.noncollinear import NoncollinearXC, energy_with_grid, vxc_
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.common import (
     adaptive_diago_tol,
+    assert_charge_conserved,
     convergence_gate,
     record_iteration,
     symmetrize_rho,
@@ -490,10 +491,7 @@ def scf_uspp_noncollinear(
             m_g = torch.stack([r_to_g(m_out[i].to(CDTYPE)) for i in range(3)])
             m_out = g_to_r_box(system.rho_symmetrizer.apply_m(m_g), real=True)
 
-        n_tot = float(rho_out.sum()) * vol / grid.n_points
-        if abs(n_tot - system.n_electrons) >= 1e-5:
-            raise ValueError(
-                f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
+        assert_charge_conserved(rho_out, system.n_electrons, vol, grid.n_points)
 
         # ---- energies ----
         rho_g_out = r_to_g(rho_out.to(CDTYPE))
