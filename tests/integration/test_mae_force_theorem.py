@@ -32,7 +32,12 @@ import torch
 
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.spin import LSDA_PW92
-from gradwave.postscf.mae import force_theorem_mae
+from gradwave.postscf.mae import (
+    _fband_strained,
+    _frozen_oneshot,
+    force_theorem_mae,
+    mae_strained,
+)
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
@@ -152,3 +157,48 @@ def test_folded_directions_match_full_mesh():
     assert float(d_f) < 1e-6, f"folded vs full F_band off by {float(d_f):.2e} eV"
     d_mae = (fold.mae - full.mae).abs().max()
     assert float(d_mae) < 1e-6, f"folded vs full MAE off by {float(d_mae):.2e} eV"
+
+
+@pytest.mark.slow
+def test_mae_strain_gradient_matches_fd():
+    """The differentiable force-theorem MAE-strain gradient (postscf.mae.
+    mae_strained / mae_strain_gradient) is validated two ways on L1_0 FePt:
+
+    1. per-direction F_band(ε=0) reproduces force_theorem_mae's band energies
+       (the band-energy potential-expectation assembly is correct), and
+    2. the analytic dMAE/dη for a volume-conserving tetragonal strain
+       ε = η·diag(-1,-1,2) matches a central finite difference of the same
+       frozen-orbital functional (autograd is the correct Hellmann-Feynman
+       gradient). Coarse mesh — this checks the gradient identity, not a
+       converged physical MAE."""
+    torch.set_num_threads(8)
+    xc = NoncollinearXC(LSDA_PW92())
+    res = _fept_scf([0, 0, 1.0])
+    ref = torch.as_tensor(res.mag_vec / np.linalg.norm(res.mag_vec),
+                          dtype=torch.float64)
+    prep_h = _frozen_oneshot(res, xc, (1, 0, 0), ref, smearing="gaussian",
+                             width=0.1, diago_tol=1e-10)
+    prep_e = _frozen_oneshot(res, xc, (0, 0, 1), ref, smearing="gaussian",
+                             width=0.1, diago_tol=1e-10)
+
+    # (1) F_band assembly == the established force theorem, per direction
+    ft = force_theorem_mae(res, xc, [[0, 0, 1.0], [1.0, 0, 0]], verbose=False)
+    eps0 = torch.zeros(3, 3, dtype=torch.float64)
+    fb_h = float(_fband_strained(res, xc, prep_h, eps0))
+    fb_e = float(_fband_strained(res, xc, prep_e, eps0))
+    assert abs(fb_h - float(ft.band_free_energies[1])) < 1e-4
+    assert abs(fb_e - float(ft.band_free_energies[0])) < 1e-4
+
+    # (2) autograd dMAE/dη == central FD (same frozen orbitals)
+    tetra = torch.tensor([[-1.0, 0, 0], [0, -1.0, 0], [0, 0, 2.0]],
+                         dtype=torch.float64)
+    eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
+    (g,) = torch.autograd.grad(mae_strained(res, xc, prep_h, prep_e, eps), eps)
+    g = 0.5 * (g + g.T)
+    d_ag = float(-g[0, 0] - g[1, 1] + 2 * g[2, 2])
+
+    def _e(eta):
+        return float(mae_strained(res, xc, prep_h, prep_e, eta * tetra))
+    d_fd = (_e(1e-4) - _e(-1e-4)) / 2e-4
+    rel = abs(d_ag - d_fd) / (abs(d_fd) + 1e-12)
+    assert rel < 1e-4, f"autograd {d_ag:.6f} vs FD {d_fd:.6f} eV, rel {rel:.2e}"

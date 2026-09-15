@@ -62,6 +62,7 @@ from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.loop import System
 from gradwave.scf.noncollinear import NCResult, SpinorHamiltonian
+from gradwave.scf.spinor_common import pauli_density_accumulate
 from gradwave.solvers.davidson import davidson_batched
 
 
@@ -362,3 +363,144 @@ def force_theorem_mae(
     return MAEResult(directions=list(directions), band_free_energies=f_t,
                      mae=f_t - f_t[0], fermi=fermis, eigenvalues=spectra,
                      nk=nks)
+
+
+# ---------------------------------------------------------------------------
+# Differentiable MAE-vs-strain: the force theorem carried onto the stress graph.
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def _frozen_oneshot(res, xc, n_dir, ref, *, smearing, width, diago_tol):
+    """One frozen-potential spinor diagonalization on the FULL mesh for the
+    magnetization axis ``n_dir`` (rotated from ``ref``). Returns a dict (all
+    tensors detached): ``coeffs`` (one-shot orbitals, nk, nb, 2·npw_max), ``occ``
+    (Fermi occupations at the frozen density's electron count), ``m_rot`` (the
+    rigidly-rotated magnetization, 3, *grid), the direction's band density
+    ``rho_band``/``m_band`` (Σf|ψ|², Σf ψ†σψ, res.rho/res.m convention), and the
+    scalar ``entropy`` term. No folding — the coefficients live on the full
+    ``system.spheres`` so ``_energy_strained_fr``'s per-k loop matches. Mirrors
+    the per-direction machinery of :func:`force_theorem_mae`, but keeps the
+    eigenVECTORS and band density the force theorem discards."""
+    system = res.system
+    grid, bk = system.grid, system.batch
+    assert bk is not None and res.coeffs is not None
+    device = system.positions.device
+    vol = grid.volume
+    m_pw = bk.npw_max
+    scheme = SCHEMES[smearing]
+    rho, m = res.rho.to(device), res.m.to(device)
+    v_h = g_to_r_box(hartree_potential_g(r_to_g(rho.to(CDTYPE)), grid.g2), real=True)
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, vol)
+    vloc_r = g_to_r_box(vloc_g, real=True)
+    projs_b = projectors_b(bk, system.positions)
+    q_so = dij_so = None
+    if system.is_fr:
+        from gradwave.core.spinor_proj import build_so_projectors
+
+        q_so, dij_so = build_so_projectors(bk, system)
+    t2 = torch.cat([bk.t, bk.t], dim=-1)
+    mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
+
+    n_t = _unit(torch.as_tensor(n_dir, dtype=RDTYPE))
+    r_mat, axis, theta = _rotation_between(ref, n_t)
+    m_rot = torch.einsum("ij,jxyz->ixyz", r_mat.to(device), m)
+    v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m_rot, grid, rho_core=system.rho_core)
+    h = SpinorHamiltonian(bk, grid.shape, v_h + v_xc + vloc_r, b_xc, projs_b,
+                          q=q_so, dij_so=dij_so)
+    seed = _spin_rotate(res.coeffs.to(device), m_pw, axis, theta)
+    dav = davidson_batched(h.apply, seed, t2, mask2, tol=diago_tol)
+    eigs = dav.eigenvalues.to(RDTYPE)
+    mu = float(find_fermi(eigs, system.kweights, scheme, width,
+                          system.n_electrons, degeneracy=1.0))
+    mu_t = torch.tensor(mu, dtype=RDTYPE, device=eigs.device)
+    occ, s_ent = occupations_and_entropy(eigs, mu_t, scheme, width,
+                                         degeneracy=1.0)
+    coeffs = dav.eigenvectors.detach()
+    w_kb = system.kweights[:, None] * occ
+    nbands = coeffs.shape[1]
+    rho_band, m_band = pauli_density_accumulate(
+        coeffs, w_kb, bk, grid.shape, m_pw, nbands, nbands, device)
+    entropy = float(-width * (system.kweights[:, None] * s_ent).sum())
+    return {
+        "coeffs": coeffs,
+        "occ": occ.detach(),
+        "m_rot": m_rot.detach(),
+        "rho_band": (rho_band / vol).detach(),
+        "m_band": (m_band / vol).detach(),
+        "entropy": entropy,
+    }
+
+
+def _fband_strained(res, xc, prep, eps):
+    """Force-theorem BAND free energy F_band(ε) = Σf⟨ψ|H(ε)|ψ⟩ + entropy [eV]
+    for one direction, differentiable in the strain ``eps``. Delegates to
+    ``stress._energy_strained_fr(band_energy=True)`` with the direction's frozen
+    one-shot orbitals and band density; the (ε-independent) entropy is added as a
+    constant. At ε=0 this reproduces :func:`force_theorem_mae`'s
+    ``band_free_energies``."""
+    from gradwave.postscf.stress import _energy_strained_fr
+
+    return _energy_strained_fr(
+        res, xc, eps, coeffs=prep["coeffs"], occ=prep["occ"], m=prep["m_rot"],
+        band_energy=True, rho_band=prep["rho_band"], m_band=prep["m_band"],
+    ) + prep["entropy"]
+
+
+def mae_strained(res, xc, prepared_hard, prepared_easy, eps):
+    """MAE = F_band(hard) − F_band(easy) [eV] as a function of the strain tensor
+    ``eps`` (3,3), differentiable in ``eps``.
+
+    Each term is the frozen-density force-theorem band energy
+    (:func:`_fband_strained`) at that direction's one-shot orbitals and
+    rigidly-rotated magnetization — the SAME quantity :func:`force_theorem_mae`
+    differences, now carried onto the stress strain graph. Orbitals/occupations
+    are frozen, so ∂/∂ε is the force-theorem (Hellmann-Feynman) strain
+    derivative — exact for the band-energy functional."""
+    return (_fband_strained(res, xc, prepared_hard, eps)
+            - _fband_strained(res, xc, prepared_easy, eps))
+
+
+def mae_strain_gradient(res, xc, hard_dir=(1.0, 0.0, 0.0),
+                        easy_dir=(0.0, 0.0, 1.0), *, ref_dir=None,
+                        smearing: str = "gaussian", width: float = 0.1,
+                        diago_tol: float = 1e-10):
+    """MAE = E(hard_dir) − E(easy_dir) and its full strain gradient ∂MAE/∂ε_αβ
+    (a symmetric 3×3 tensor, [eV]) at ε=0, via autograd through the
+    frozen-density force-theorem anisotropy energy (:func:`mae_strained`).
+
+    ``res`` is a converged ``scf_noncollinear`` result on a fully-relativistic
+    system with the full k-mesh (``use_symmetry=False, time_reversal=False``),
+    exactly as :func:`force_theorem_mae` requires. The rotation origin is the
+    reference texture's axis ``ref_dir`` (default: the SCF net moment
+    ``res.mag_vec``); ``hard_dir``/``easy_dir`` are the two trial axes.
+
+    Returns ``(mae_eV, grad)`` where ``grad`` is ∂MAE/∂ε. For a
+    volume-conserving tetragonal distortion ε = η·diag(−1,−1,2) (c/a → c/a·(1+3η)),
+    the scalar ``dMAE/dη = 2·grad[2,2] − grad[0,0] − grad[1,1]`` gives the
+    inverse-design gradient — a single Newton step ``η ← η + dMAE/dη · step``
+    replaces the parameter scan the FePt example ``benchmarks/mae_inverse``
+    currently fits a parabola to.
+
+    This is the gradient of the frozen-orbital force-theorem functional; it
+    matches a finite difference of :func:`mae_strained` at fixed orbitals to
+    machine precision, and a finite difference that RE-diagonalizes at each
+    strain to the force-theorem (Hellmann-Feynman) accuracy."""
+    system = res.system
+    if system.rho_symmetrizer is not None:
+        raise ValueError(
+            "mae_strain_gradient needs the full k-mesh (use_symmetry=False, "
+            "time_reversal=False) — a mesh folded by the reference magnetic "
+            "group is not a valid quadrature for a rotated moment")
+    if res.coeffs is None:
+        raise ValueError("res carries no spinor coefficients")
+    ref = _unit(torch.as_tensor(
+        res.mag_vec if ref_dir is None else ref_dir, dtype=RDTYPE))
+    prep_hard = _frozen_oneshot(res, xc, hard_dir, ref, smearing=smearing,
+                                width=width, diago_tol=diago_tol)
+    prep_easy = _frozen_oneshot(res, xc, easy_dir, ref, smearing=smearing,
+                                width=width, diago_tol=diago_tol)
+    dev = system.positions.device
+    eps = torch.zeros(3, 3, dtype=RDTYPE, device=dev, requires_grad=True)
+    mae = mae_strained(res, xc, prep_hard, prep_easy, eps)
+    (grad,) = torch.autograd.grad(mae, eps)
+    return mae.detach(), 0.5 * (grad + grad.T)

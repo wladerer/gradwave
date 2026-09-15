@@ -401,7 +401,8 @@ def _energy_strained_fr(
     xc: NoncollinearXC,
     eps: torch.Tensor,
     *,
-    rho=None, coeffs=None, spheres=None,
+    rho=None, coeffs=None, spheres=None, m=None, occ=None,
+    band_energy: bool = False, rho_band=None, m_band=None,
     manifolds: list[HubbardManifold] | None = None,
 ) -> torch.Tensor:
     """KS energy vs strain for a fully-relativistic (spin-orbit) spinor result.
@@ -432,13 +433,18 @@ def _energy_strained_fr(
     shape = grid.shape
 
     rho = res.rho.detach() if rho is None else rho  # total ρ↑+ρ↓
-    m_vec = res.m.detach()  # magnetization (3, *grid)
+    # m⃗ override (force-theorem MAE-strain path: the rigidly-rotated frozen
+    # magnetization for a trial axis). |m| is preserved by the rotation, so the
+    # locally-collinear E_xc is unchanged — the anisotropy enters only through
+    # the coeffs/SOC term below, exactly as in postscf.mae.
+    m_vec = res.m.detach() if m is None else m  # magnetization (3, *grid)
     spheres = system.spheres if spheres is None else spheres
     if coeffs is None:
         assert res.coeffs is not None, "res carries no spinor coefficients"
         coeffs = res.coeffs.detach()  # (nk,nb,2·npw_max)
-    assert res.occupations is not None
-    occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
+    if occ is None:
+        assert res.occupations is not None
+        occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
     kw = system.kweights
 
     _f_map, a_e, b_e, omega0, omega, pos_e = strain_cell(
@@ -513,6 +519,33 @@ def _energy_strained_fr(
         quad = torch.einsum(
             "bi,ij,bj->b", b_ovl.conj(), dij_so.to(b_ovl.dtype), b_ovl).real
         e_nl = e_nl + (kw[ik] * occ[ik, :nb] * quad).sum()
+
+    if band_energy:
+        # Force-theorem BAND energy Σf⟨ψ|H(ε)|ψ⟩ = e_kin + e_nl(SOC) + the
+        # frozen-potential expectation ∫V_KS·ρ_band, contracted with the
+        # DIRECTION's band density (rho_band/m_band from its one-shot orbitals)
+        # rather than the total-energy double-counting terms above. The Hartree
+        # and local pieces carry the explicit cell (strain) dependence; the LDA
+        # v_xc/b_xc are pointwise on the frozen ρ₀, so ∫v_xc·ρ_band is
+        # electron-conserving and ε-independent (zero strain derivative). No
+        # Ewald — ion-ion is not part of the band sum. Reproduces
+        # postscf.mae.force_theorem_mae's F_band at ε=0.
+        from gradwave.core.xc.noncollinear import vxc_and_bxc
+
+        assert rho_band is not None and m_band is not None
+        rhob_t = (r_to_g(rho_band.to(torch.complex128)) * omega0).reshape(-1)[mask]
+        rhob_g = rhob_t / omega.to(rhob_t.dtype)
+        e_loc_b = local_pp_energy(tabs, system.species_of_atom, phases, rhob_g,
+                                  q_sph, is_g0)
+        e_h_b = 4.0 * math.pi * E2 / omega * (
+            (rho_t.conj() * rhob_t) * inv_g2).sum().real
+        v_xc_r, b_xc_r, _ = vxc_and_bxc(xc, rho, m_vec, grid,
+                                        rho_core=system.rho_core)
+        n_grid = shape[0] * shape[1] * shape[2]
+        e_xc_b = (omega / n_grid) * (
+            (v_xc_r * (rho_band * scale)).sum()
+            + (b_xc_r * (m_band * scale)).sum())
+        return e_kin + e_nl + e_loc_b + e_h_b + e_xc_b
 
     # ---- Ewald (integer image/G sets fixed at ε=0, vectors strained)
     e_ew = ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
