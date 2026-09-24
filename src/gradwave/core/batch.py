@@ -265,8 +265,14 @@ def build_batched(
     )
 
 
-def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape: tuple[int, int, int]) -> torch.Tensor:
-    """(nk, nb, npw_max) → (nk, nb, n1, n2, n3): f = Σ_G c e^{iGr}."""
+def _g_to_r_b_single(
+    coeffs: torch.Tensor, bk: BatchedK, shape: tuple[int, int, int]
+) -> torch.Tensor:
+    """Single-shot (nk, nb, npw_max) → (nk, nb, *shape); the historical body of
+    ``g_to_r_b``. Called directly when no band-chunk budget applies, else once
+    per band slice. There is NO cross-band reduction here (each band's scatter +
+    inverse FFT is independent), so building the box a band-slice at a time is
+    bit-identical to the single-shot build, element for element."""
     nk, nb, m = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
     box = torch.zeros(nk, nb, n, dtype=coeffs.dtype, device=coeffs.device)
@@ -274,6 +280,41 @@ def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape: tuple[int, int, int]) ->
     box = box.scatter_add(2, idx, coeffs)
     box = box.reshape(nk, nb, *shape)
     return g_to_r_box(box)
+
+
+def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape: tuple[int, int, int]) -> torch.Tensor:
+    """(nk, nb, npw_max) → (nk, nb, n1, n2, n3): f = Σ_G c e^{iGr}.
+
+    Band-chunked to bound the dense-box CONSTRUCTION transient, using the same
+    ``_dense_band_chunk`` budget as ``density_b``/``_local_fft_into``. The
+    single-shot build coexists a scatter box, its scatter_add output and the FFT
+    output — roughly 2–3× the returned box — as a transient peak; filling the
+    preallocated output in band slices caps that peak at the returned box plus
+    one chunk's temporaries.
+
+    Chunking is OPTIONAL and every caller inherits it with no signature change:
+    it engages on GPU (the ``_gpu_dense_budget_bytes`` budget) and on CPU only
+    when a budget is set (``GRADWAVE_CPU_DENSE_BUDGET`` or the SCF auto
+    estimator's process-local override). With no budget the CPU path takes the
+    single-shot branch and is byte-identical to the historical single batched
+    FFT — same graph, same values. Bit-exact either way (no cross-band
+    reduction; see ``_g_to_r_b_single``).
+
+    NOTE: this bounds only the transient during construction, not the returned
+    ``(nk, nb, *shape)`` box itself, which is full-size — a caller that must
+    hold the whole box still holds it. It is the right lever here because the
+    hottest reducing caller (``dielectric``) reuses its ``psi_r`` box across a
+    fixed-point solve and so cannot reduce-as-it-goes without restructuring."""
+    nk, nb, m = coeffs.shape
+    n = shape[0] * shape[1] * shape[2]
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
+    if chunk >= nb:
+        return _g_to_r_b_single(coeffs, bk, shape)
+    out = coeffs.new_empty(nk, nb, *shape)
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        out[:, lo:hi] = _g_to_r_b_single(coeffs[:, lo:hi], bk, shape)
+    return out
 
 
 def box_to_sphere_b(box: torch.Tensor, bk: BatchedK) -> torch.Tensor:
