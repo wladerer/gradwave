@@ -37,6 +37,7 @@ import math
 import torch
 
 from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
+from gradwave.core.xc.learnable import _inv_softplus
 from gradwave.postscf.coulomb_kernel import coulomb_kernel
 from gradwave.scf.loop import SCFResult, System
 
@@ -259,8 +260,3 @@ def hybrid_exchange_energy(
 def _inv_sigmoid(y: float) -> torch.Tensor:
     yt = torch.tensor(float(y), dtype=torch.float64)
     return torch.log(yt) - torch.log1p(-yt)
-
-
-def _inv_softplus(y: float) -> torch.Tensor:
-    yt = torch.tensor(float(y), dtype=torch.float64)
-    return yt + torch.log(-torch.expm1(-yt))

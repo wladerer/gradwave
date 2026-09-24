@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from gradwave.grids import gmax_from_ecut
+from gradwave.kpoints import axis_vacuum_gaps as _axis_vacuum_gaps
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -91,36 +92,6 @@ class SlabBox:
     length_after: float  # open-axis length after [Å]
     npw_estimate: int  # plane-wave count estimate at the *original* box
     reason: str  # human-readable note (why trimmed / why not)
-
-
-def _axis_vacuum_gaps(cell: np.ndarray, positions: np.ndarray) -> np.ndarray:
-    """Largest vacuum gap [Å] along each of the three cell axes.
-
-    Projects atoms onto each axis' fractional coordinate, sorts, and measures the
-    widest gap between consecutive occupied planes (including the periodic
-    wrap-around). A slab has one axis whose widest gap is the vacuum layer; a
-    bulk cell has small gaps on every axis. Taking the *largest* gap in
-    fractional coordinates makes it robust to a protruding adsorbate — the
-    adsorbate only shrinks the open-axis gap, it does not move detection onto a
-    periodic axis. (Mirrors ``kpoints._axis_vacuum_gaps`` — the same detection
-    the slab k-mesh uses.)"""
-    cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
-    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
-    lengths = np.linalg.norm(cell, axis=1)
-    if len(pos) == 0:
-        return np.zeros(3)
-    frac = pos @ np.linalg.inv(cell)
-    gaps = np.zeros(3)
-    for i in range(3):
-        f = np.sort(np.mod(frac[:, i], 1.0))
-        if len(f) == 1:
-            widest = 1.0
-        else:
-            internal = np.diff(f)
-            wrap = (f[0] + 1.0) - f[-1]
-            widest = float(max(internal.max(), wrap))
-        gaps[i] = widest * lengths[i]
-    return gaps
 
 
 def _npw_estimate(cell: np.ndarray, ecut: float) -> int:

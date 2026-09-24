@@ -16,7 +16,7 @@ import numpy as np
 from gradwave.grids import reciprocal_cell
 
 
-def _axis_vacuum_gaps(
+def axis_vacuum_gaps(
     cell: np.ndarray, positions: np.ndarray
 ) -> np.ndarray:
     """Largest vacuum gap [Å] along each of the three cell axes.
@@ -67,7 +67,7 @@ def slab_kmesh(
     (6,6,1) slab refined uniformly to (9,9,2) doubles the k-count for no accuracy).
 
     The vacuum axis is auto-detected as the axis with the widest inter-atomic gap
-    (:func:`_axis_vacuum_gaps`); it is only pinned when that gap is at least
+    (:func:`axis_vacuum_gaps`); it is only pinned when that gap is at least
     ``min_vacuum_gap`` Å, so a bulk cell (no real vacuum) is returned untouched —
     every axis solved from ``kspacing``. Pass ``vacuum_axis`` to force a specific
     axis; a forced axis whose gap is below ``min_vacuum_gap`` still pins but warns.
@@ -82,7 +82,7 @@ def slab_kmesh(
     blen = np.linalg.norm(recip, axis=1)
     mesh = [max(1, int(np.ceil(b / kspacing))) for b in blen]
 
-    gaps = _axis_vacuum_gaps(cell, positions)
+    gaps = axis_vacuum_gaps(cell, positions)
     if vacuum_axis is None:
         axis = int(np.argmax(gaps))
         if gaps[axis] >= min_vacuum_gap:

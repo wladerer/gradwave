@@ -59,3 +59,16 @@ def pair_distances(
     d = d + self_mask[..., None].to(dt) * offset
     r = torch.linalg.norm(d, dim=-1)
     return r, self_mask
+
+
+def cell_tensor(
+    cell: torch.Tensor | np.ndarray | None, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor | None:
+    """The cell as a differentiable tensor on the target dtype/device (or None).
+
+    Shared by the D3/D4 force/stress autograd wrappers, which need the cell as a
+    leaf tensor to differentiate the stress with respect to it.
+    """
+    if cell is None:
+        return None
+    return torch.as_tensor(np.asarray(cell, dtype=np.float64), dtype=dtype, device=device)
