@@ -36,7 +36,12 @@ import torch
 from typing_extensions import override
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.batch import BatchedK, box_to_sphere_b, g_to_r_b
+from gradwave.core.batch import (
+    BatchedK,
+    _dense_band_chunk,
+    box_to_sphere_b,
+    g_to_r_b,
+)
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
 from gradwave.core.xc.base import to_au
@@ -57,6 +62,33 @@ from gradwave.postscf.exchange_multik import (
     occupied_periodic_orbitals,
 )
 from gradwave.scf.loop import SCFResult, System, scf
+
+
+def _fock_apply_banded(
+    c: torch.Tensor,
+    bk: BatchedK,
+    shape: tuple[int, int, int],
+    alpha: float,
+    apply_box: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Band-chunked α·V_x apply shared by the Γ and multi-k Fock hooks.
+
+    ``apply_box(f)`` maps a dense-box band slice ``(nk, m, *shape)`` to V_x f of
+    the same shape (the per-band-linear ACE action, Σᵢ ξᵢ⟨ξᵢ|f⟩). The nb axis is
+    chunked via ``_dense_band_chunk`` so the transient is one band slice plus the
+    preallocated sphere-space output, never two full dense boxes over all bands.
+    Because both the ACE apply and ``box_to_sphere_b`` act per band, the result is
+    bit-identical to a single pass; on CPU with no budget set ``_dense_band_chunk``
+    returns a large sentinel → one chunk = the historical single-pass behaviour."""
+    nk, nb = c.shape[0], c.shape[1]
+    n_grid = shape[0] * shape[1] * shape[2]
+    chunk = _dense_band_chunk(n_grid, nk, c.device, c.element_size())
+    out = c.new_empty((nk, nb, bk.npw_max))
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        f = g_to_r_b(c[:, lo:hi], bk, shape)   # (nk, m, *shape) periodic parts
+        out[:, lo:hi] = box_to_sphere_b(apply_box(f), bk)
+    return alpha * out
 
 
 class ScaledExchangePBE(PBE):
@@ -125,11 +157,13 @@ class GammaFockExchange:
     def _apply_for(self, ace, bk, shape):
         alpha = self.alpha
 
+        def apply_box(f: torch.Tensor) -> torch.Tensor:
+            nkf, m = f.shape[0], f.shape[1]                  # (nk, m, *shape)
+            # single Γ operator: fold (nk, m) into one batch of rows (V_x f linear)
+            return ace.apply(f.reshape(nkf * m, -1)).reshape(nkf, m, *shape)
+
         def apply_delta(c: torch.Tensor) -> torch.Tensor:
-            nk, nb = c.shape[0], c.shape[1]
-            f = g_to_r_b(c, bk, shape).reshape(nk * nb, -1)  # periodic field Σ_G c e^{iGr}
-            wf = ace.apply(f).reshape(nk, nb, *shape)        # V_x f (linear; = √Ω·V_x ψ)
-            return alpha * box_to_sphere_b(wf, bk)
+            return _fock_apply_banded(c, bk, shape, alpha, apply_box)
 
         return apply_delta
 
@@ -217,14 +251,16 @@ class MultiKFockExchange:
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         alpha = self.alpha
 
-        def apply_delta(c: torch.Tensor) -> torch.Tensor:
-            nk, nb = c.shape[0], c.shape[1]
-            f = g_to_r_b(c, bk, shape)                    # (nk, nb, *shape) periodic parts
+        def apply_box(f: torch.Tensor) -> torch.Tensor:
+            m = f.shape[1]                                # (nk, m, *shape)
             wf = torch.empty_like(f)
-            for ik in range(nk):
-                fi = f[ik].reshape(nb, -1)                # (nb, N_r) trial parts at k
-                wf[ik] = ace_per_k[ik].apply(fi).reshape(nb, *shape)
-            return alpha * box_to_sphere_b(wf, bk)
+            for ik in range(f.shape[0]):
+                fi = f[ik].reshape(m, -1)                 # (m, N_r) trial parts at k
+                wf[ik] = ace_per_k[ik].apply(fi).reshape(m, *shape)
+            return wf
+
+        def apply_delta(c: torch.Tensor) -> torch.Tensor:
+            return _fock_apply_banded(c, bk, shape, alpha, apply_box)
 
         return apply_delta
 
