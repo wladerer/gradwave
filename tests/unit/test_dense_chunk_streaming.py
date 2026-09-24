@@ -24,6 +24,7 @@ from gradwave.core.batch import (
     BatchedK,
     _cpu_dense_budget_bytes,
     _dense_band_chunk,
+    g_to_r_b,
     projectors_b,
     set_cpu_dense_budget_override,
 )
@@ -83,6 +84,90 @@ def test_projectors_b_empty_projectors_shortcircuits():
     pos = torch.randn(4, 3, dtype=RDTYPE)
     out = projectors_b(bk, pos)
     assert out.shape[1] == 0
+
+
+# ---------------------------------------------------------------------------
+# g_to_r_b band-chunk (campaign: bound the dense-box construction transient)
+#
+# The optional band-chunk fills the returned box a band-slice at a time under a
+# forced GRADWAVE_CPU_DENSE_BUDGET. g_to_r_b has NO cross-band reduction, so the
+# chunked build must be BIT-IDENTICAL to the unforced single-shot build, and the
+# default (no budget) path must stay differentiable.
+# ---------------------------------------------------------------------------
+
+def _mk_bk_grid(nk=2, m=13, shape=(6, 5, 4)):
+    """A minimal BatchedK whose flat_idx scatters a sphere into an FFT box of
+    ``shape`` (distinct in-range indices, so g_to_r_b/g_to_r_box are exercised)."""
+    n = shape[0] * shape[1] * shape[2]
+    assert m <= n
+    flat = torch.stack([torch.randperm(n)[:m] for _ in range(nk)]).to(torch.int64)
+    nproj = 0
+    return BatchedK(
+        npw=torch.full((nk,), m, dtype=torch.int64),
+        mask=torch.ones(nk, m, dtype=torch.bool),
+        flat_idx=flat,
+        kpg=torch.zeros(nk, m, 3, dtype=RDTYPE),
+        t=torch.zeros(nk, m, dtype=RDTYPE),
+        proj_phase_free=torch.zeros(nk, nproj, m, dtype=CDTYPE),
+        proj_atom_index=torch.zeros(nproj, dtype=torch.int64),
+        dij_full=torch.zeros((nproj, nproj), dtype=RDTYPE),
+    )
+
+
+def _budget_for_chunk(target: int, n: int, nk: int, elem_bytes: int) -> float:
+    """A CPU dense budget that makes ``_dense_band_chunk`` return ~``target``
+    bands per chunk for this (n, nk, elem_bytes) — used to force a genuine
+    multi-slice build in the tests below regardless of the tiny grid sizes."""
+    return float(target * elem_bytes * n * nk)
+
+
+def test_g_to_r_b_chunked_is_bit_identical():
+    shape = (6, 5, 4)
+    nk, nb, m = 2, 32, 13
+    n = shape[0] * shape[1] * shape[2]
+    bk = _mk_bk_grid(nk=nk, m=m, shape=shape)
+    coeffs = torch.randn(nk, nb, m, dtype=CDTYPE)
+
+    # reference: no budget -> single-shot historical path
+    set_cpu_dense_budget_override(None)
+    ref = g_to_r_b(coeffs, bk, shape)
+
+    # forced budget sized to ~4 bands/chunk -> multi-band-slice build; must
+    # engage AND match exactly
+    set_cpu_dense_budget_override(_budget_for_chunk(4, n, nk, coeffs.element_size()))
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
+    assert 1 <= chunk < nb  # the budget really splits the band axis (>1 chunk)
+    got = g_to_r_b(coeffs, bk, shape)
+
+    assert got.shape == ref.shape
+    assert torch.equal(got, ref)  # no cross-band reduction -> bit-identical
+
+
+def test_g_to_r_b_complex64_chunked_bit_identical():
+    shape = (5, 4, 4)
+    nk, nb, m = 1, 20, 11
+    n = shape[0] * shape[1] * shape[2]
+    bk = _mk_bk_grid(nk=nk, m=m, shape=shape)
+    coeffs = torch.randn(nk, nb, m, dtype=torch.complex64)
+    set_cpu_dense_budget_override(None)
+    ref = g_to_r_b(coeffs, bk, shape)
+    set_cpu_dense_budget_override(_budget_for_chunk(3, n, nk, coeffs.element_size()))
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
+    assert 1 <= chunk < nb
+    got = g_to_r_b(coeffs, bk, shape)
+    assert torch.equal(got, ref)
+
+
+def test_g_to_r_b_default_path_differentiable():
+    shape = (4, 4, 4)
+    nk, nb, m = 1, 4, 7
+    bk = _mk_bk_grid(nk=nk, m=m, shape=shape)
+    set_cpu_dense_budget_override(None)  # default single-shot path
+    coeffs = torch.randn(nk, nb, m, dtype=CDTYPE, requires_grad=True)
+    out = g_to_r_b(coeffs, bk, shape)
+    assert out.requires_grad
+    out.abs().pow(2).sum().backward()
+    assert coeffs.grad is not None and torch.isfinite(coeffs.grad).all()
 
 
 # ---------------------------------------------------------------------------
