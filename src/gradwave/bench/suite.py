@@ -32,10 +32,6 @@ def _fcc(a: float) -> np.ndarray:
     return (a / 2.0) * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 
 
-def _bcc(a: float) -> np.ndarray:
-    return (a / 2.0) * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]])
-
-
 @dataclass
 class BenchCase:
     """One benchmark system + its fixed run-time SCF configuration."""

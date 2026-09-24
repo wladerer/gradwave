@@ -34,6 +34,7 @@ from jaxtyping import Complex, Float, jaxtyped
 from typing_extensions import override
 
 from gradwave.api._common import SPIN_XC_REGISTRY, XC_REGISTRY
+from gradwave.api.system import _fft_grid
 from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import RDTYPE
 from gradwave.grids import FFTGrid, GSphere
@@ -90,12 +91,6 @@ class _TolLadder:
                           else float(cfg["rhotol_final"])),
             first_step=first,
         )
-
-
-def _fft_grid(system: System | USPPSystem) -> FFTGrid:
-    """Both `System.grid` and `USPPSystem.grid` are `FFTGrid`; this just names
-    the shared field for callers that hold the `System | USPPSystem` union."""
-    return system.grid
 
 
 @jaxtyped(typechecker=beartype)

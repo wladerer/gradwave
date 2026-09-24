@@ -60,14 +60,11 @@ from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._vecmath import unit as _unit
 from gradwave.scf.loop import System
 from gradwave.scf.noncollinear import NCResult, SpinorHamiltonian
 from gradwave.scf.spinor_common import pauli_density_accumulate
 from gradwave.solvers.davidson import davidson_batched
-
-
-def _unit(v: torch.Tensor) -> torch.Tensor:
-    return v / torch.linalg.norm(v)
 
 
 def _rotation_between(a: torch.Tensor, b: torch.Tensor):

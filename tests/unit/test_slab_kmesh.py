@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from gradwave.api.converge import _scaled_mesh
-from gradwave.kpoints import _axis_vacuum_gaps, slab_kmesh
+from gradwave.kpoints import axis_vacuum_gaps, slab_kmesh
 
 
 def _slab(lz=20.0, top=5.0, n_layer=4, a=3.0):
@@ -35,7 +35,7 @@ def test_slab_kmesh_returns_n_n_1():
 
 def test_vacuum_axis_detected_is_z():
     cell, pos = _slab()
-    gaps = _axis_vacuum_gaps(cell, pos)
+    gaps = axis_vacuum_gaps(cell, pos)
     assert int(np.argmax(gaps)) == 2
     assert gaps[2] > gaps[0] and gaps[2] > gaps[1]
 

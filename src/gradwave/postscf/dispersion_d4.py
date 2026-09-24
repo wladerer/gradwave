@@ -74,6 +74,9 @@ from gradwave.dtypes import RDTYPE
 from gradwave.grids import reciprocal_cell
 from gradwave.postscf import _d4_params as P
 from gradwave.postscf._dispersion_geom import (
+    cell_tensor as _cell_tensor,
+)
+from gradwave.postscf._dispersion_geom import (
     image_labels as _image_labels,
 )
 from gradwave.postscf._dispersion_geom import (
@@ -570,14 +573,6 @@ def eeq_charges(
 # ---------------------------------------------------------------------------
 # forces & stress (autograd wrappers — mirror postscf/forces.py, stress.py)
 # ---------------------------------------------------------------------------
-
-def _cell_tensor(
-    cell: torch.Tensor | np.ndarray | None, dtype: torch.dtype, device: torch.device
-) -> torch.Tensor | None:
-    if cell is None:
-        return None
-    return torch.as_tensor(np.asarray(cell, dtype=np.float64), dtype=dtype, device=device)
-
 
 def dispersion_forces(
     positions: torch.Tensor,

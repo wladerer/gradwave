@@ -50,12 +50,6 @@ AnyResult = SCFResult | NCResult | USPPResult | USPPNCResult
 _WRITERS = {".cube": "cube", ".xsf": "xsf", ".chgcar": "chgcar"}
 
 
-def _is_spinor(res: AnyResult) -> bool:
-    """NC/SOC results store spinor coeffs as one (nk,nb,2·npw_max) tensor;
-    collinear results store a per-k list."""
-    return res.coeffs is not None and not isinstance(res.coeffs, list)
-
-
 def _atoms_from_system(system: System | USPPSystem) -> ase.atoms.Atoms:
     """ASE Atoms (cell rows a_i [Å], Cartesian positions, true Z) from a System."""
     from ase import Atoms

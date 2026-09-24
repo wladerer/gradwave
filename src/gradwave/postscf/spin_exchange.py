@@ -67,12 +67,9 @@ from __future__ import annotations
 import torch
 
 from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.postscf._vecmath import unit as _unit
 from gradwave.postscf.moment_config import atomic_weights, constrained_moment_scf
 from gradwave.scf.loop import System
-
-
-def _unit(v: torch.Tensor) -> torch.Tensor:
-    return v / torch.linalg.norm(v)
 
 
 def _transverse_basis(ref: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
