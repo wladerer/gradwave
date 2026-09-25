@@ -30,7 +30,10 @@ def _setup(problem_name: str):
     if problem_name == "happly":
         return (HApplyProblem(tol=1e-5),
                 mutate.HAPPLY_GENES, mutate.build_apply, mutate.HAPPLY_BASELINE)
-    raise SystemExit(f"problem must be happly|rr, got {problem_name!r}")
+    if problem_name == "happly_large":
+        return (HApplyProblem(tol=1e-5, cell="cubic8", ecut_ry=30.0, nb=32),
+                mutate.HAPPLY_GENES, mutate.build_apply, mutate.HAPPLY_BASELINE)
+    raise SystemExit(f"problem must be happly|happly_large|rr, got {problem_name!r}")
 
 
 def main() -> None:
