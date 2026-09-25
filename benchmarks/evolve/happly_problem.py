@@ -37,8 +37,9 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 ORACLE_TOL = 1e-5
 
 
-def _si_system():
-    """A real Si system from the bench suite (shipped pseudo + basis)."""
+def _si_suite_system():
+    """A real Si system from the bench suite (shipped pseudo + basis) -- the
+    small primitive-cell workload (npw ~750, nk = IBZ of 4x4x4)."""
     from gradwave.bench.suite import build_suite
 
     for case in build_suite():
@@ -47,14 +48,46 @@ def _si_system():
     raise RuntimeError("Si case not found in bench suite")
 
 
+def _si_cubic_system(ecut_ry: float):
+    """8-atom conventional-cubic diamond Si at Gamma -- a LARGE-cell workload
+    (npw ~few-thousand, nk=1, 8x the projectors). This is the frontier regime
+    where the local FFT dominates and the Toeplitz npw^2 local path is no longer
+    a win, so it tests what the loop finds when the small-cell levers die."""
+    import os
+    from pathlib import Path
+
+    import numpy as np
+
+    from gradwave.constants import RY_EV
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import setup_system
+
+    pdir = Path(os.environ.get(
+        "GRADWAVE_PSEUDO_DIR",
+        Path(__file__).resolve().parents[2] / "tests/fixtures/qe/pseudos"))
+    upf = parse_upf(str(pdir / "Si_ONCV_PBE-1.2.upf"))
+    a = 5.43
+    cell = a * np.eye(3)
+    frac = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                     [.25, .25, .25], [.25, .75, .75], [.75, .25, .75], [.75, .75, .25]])
+    return setup_system(cell, frac * a, [0] * 8, [upf], ecut=ecut_ry * RY_EV,
+                        kmesh=(1, 1, 1), nbands=40, use_symmetry=False)
+
+
 class HApplyProblem:
-    """Frozen real H-apply workload + relative-Frobenius tolerance oracle."""
+    """Frozen real H-apply workload + relative-Frobenius tolerance oracle.
+
+    ``cell="suite"`` is the small primitive Si (default); ``cell="cubic8"`` is
+    the 8-atom cubic Gamma-point large-cell frontier workload."""
 
     name = "hamiltonian_apply"
 
-    def __init__(self, *, nb: int = 24, seed: int = 0, tol: float = ORACLE_TOL) -> None:
+    def __init__(self, *, nb: int = 24, seed: int = 0, tol: float = ORACLE_TOL,
+                 cell: str = "suite", ecut_ry: float = 30.0) -> None:
         self.nb = nb
         self.tol = tol
+        self.cell = cell
+        self.ecut_ry = ecut_ry
         self._build(seed)
 
     def _build(self, seed: int) -> None:
@@ -62,7 +95,8 @@ class HApplyProblem:
         # Toeplitz path is a candidate, gated on tolerance, not the reference).
         batch_mod._TOEPLITZ_MODE = "off"
 
-        system = _si_system()
+        system = _si_cubic_system(self.ecut_ry) if self.cell == "cubic8" \
+            else _si_suite_system()
         bk = system.batch
         shape = tuple(int(s) for s in system.grid.shape)
         self.nk = int(bk.nk)
