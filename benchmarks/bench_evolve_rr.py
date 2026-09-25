@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 from evolve.driver import run_population
+from evolve.report import print_leaderboard
 from evolve.rr_problem import ORACLE_TOL, RRProblem
 
 REGIMES = {
@@ -46,29 +47,15 @@ def main() -> None:
     problem = RRProblem(**REGIMES[regime])
     results, base_ms = run_population(problem, cand_dir, reps=reps)
 
-    print(f"# evolve pilot: {problem.name}  regime={regime}  "
-          f"reps={reps}  threads={torch.get_num_threads()}")
-    print(f"# workload: nk={problem.nk} npw={problem.npw} m={problem.m} nw={problem.nw} "
-          f"dtype={problem.dtype}")
-    base_line = f"# oracle tol={ORACLE_TOL:.0e}  baseline={base_ms:.4f} ms" if base_ms \
-        else f"# oracle tol={ORACLE_TOL:.0e}  baseline INADMISSIBLE"
-    print(base_line)
-    print(f"{'candidate':<20} {'admiss':>6} {'max_err':>10} {'ms':>10} {'speedup':>8}  note")
-    for r in results:
-        ms = f"{r.fitness_ms:.4f}" if r.fitness_ms is not None else "-"
-        sp = f"{r.speedup:.3f}x" if r.speedup is not None else "-"
-        note = r.error or ("" if r.admissible else "FAILED ORACLE")
-        print(f"{r.name:<20} {r.admissible!s:>6} {r.max_err:>10.2e} {ms:>10} {sp:>8}  {note}")
-
-    # Winner among admissible non-baseline candidates (best measured speedup).
-    winners = [r for r in results if r.admissible and r.name != "baseline"
-               and r.speedup is not None]
-    if winners:
-        best = max(winners, key=lambda r: r.speedup)
-        verdict = f"BEST={best.name} speedup={best.speedup:.3f}x max_err={best.max_err:.2e}"
-    else:
-        verdict = "BEST=none (no admissible non-baseline candidate)"
-    print(verdict)  # last non-empty line -> captured as `reported`
+    tol_line = (f"oracle tol={ORACLE_TOL:.0e}  baseline={base_ms:.4f} ms" if base_ms
+                else f"oracle tol={ORACLE_TOL:.0e}  baseline INADMISSIBLE")
+    meta = [
+        f"regime={regime}  reps={reps}  threads={torch.get_num_threads()}",
+        f"workload: nk={problem.nk} npw={problem.npw} m={problem.m} nw={problem.nw} "
+        f"dtype={problem.dtype}",
+        tol_line,
+    ]
+    print_leaderboard(f"evolve pilot: {problem.name}", meta, results, base_ms)
 
 
 if __name__ == "__main__":
