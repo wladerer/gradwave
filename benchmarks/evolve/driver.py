@@ -18,8 +18,10 @@ from pathlib import Path
 from evolve.evaluator import EvalResult, Problem, evaluate
 
 
-def load_candidates(cand_dir: str | Path) -> dict[str, Callable]:
-    """Load ``rr`` from every non-underscore ``*.py`` in ``cand_dir``, by path."""
+def load_candidates(cand_dir: str | Path, *, entry: str = "rr") -> dict[str, Callable]:
+    """Load the ``entry`` callable from every non-underscore ``*.py`` in
+    ``cand_dir``, by path. ``entry`` is the candidate's entrypoint symbol -- one
+    per problem (``rr`` for the RR step, ``apply`` for the H-apply)."""
     out: dict[str, Callable] = {}
     for p in sorted(Path(cand_dir).glob("*.py")):
         if p.name.startswith("_"):
@@ -29,7 +31,7 @@ def load_candidates(cand_dir: str | Path) -> dict[str, Callable]:
             continue
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        fn = getattr(mod, "rr", None)
+        fn = getattr(mod, entry, None)
         if callable(fn):
             out[p.stem] = fn
     return out
@@ -39,12 +41,17 @@ def run_population(
     problem: Problem,
     cand_dir: str | Path,
     *,
+    entry: str = "rr",
     baseline: str = "baseline",
     warmup: int = 10,
     reps: int = 200,
 ) -> tuple[list[EvalResult], float | None]:
     """Evaluate the whole population; return (ranked results, baseline_ms)."""
-    cands = load_candidates(cand_dir)
+    cands = load_candidates(cand_dir, entry=entry)
+    if baseline not in cands:
+        raise RuntimeError(
+            f"no '{baseline}.py' exposing entry '{entry}' found in {cand_dir}; "
+            f"loaded: {sorted(cands)}")
     results = [evaluate(name, fn, problem, warmup=warmup, reps=reps)
                for name, fn in cands.items()]
 

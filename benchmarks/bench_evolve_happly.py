@@ -34,7 +34,7 @@ def main() -> None:
                             "evolve", "candidates_happly")
 
     problem = HApplyProblem(tol=tol)
-    results, base_ms = run_population(problem, cand_dir, reps=reps)
+    results, base_ms = run_population(problem, cand_dir, entry="apply", reps=reps)
 
     tol_line = (f"oracle tol={problem.tol:.0e}  baseline={base_ms:.4f} ms" if base_ms
                 else f"oracle tol={problem.tol:.0e}  baseline INADMISSIBLE")
