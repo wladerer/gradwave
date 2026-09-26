@@ -108,6 +108,32 @@ assert set(_SPECIAL_TASKS) | set(_TASK_TABLE) == set(TASKS), (
     f"{set(TASKS) ^ (set(_SPECIAL_TASKS) | set(_TASK_TABLE))}")
 
 
+def _scf_summary_extras(
+    res: Any, inp: Input, summary: dict[str, Any], disp_block: dict[str, Any] | None
+) -> None:
+    """Attach the optional post-SCF analysis blocks to an ``scf``-task summary.
+
+    Each block is gated on its own Input flag and mutates ``summary`` in place.
+    ``disp_block`` is the already-computed dispersion block (or ``None``) — the
+    dispersion energy is folded into ``res`` before ``build_summary`` runs, so
+    only the attachment happens here. The work function is attached on request or
+    automatically for an open-boundary (ESM) slab run where the vacuum plateau is
+    physically meaningful."""
+    if disp_block is not None:
+        summary["dispersion"] = disp_block
+    if inp.error_estimate:
+        summary["error_estimate"] = _error_estimate_block(res, inp)
+    if inp.projections.enabled:
+        summary["pdos"] = _pdos_summary_block(res, inp)
+    if inp.projections.cohp.enabled:
+        summary["cohp"] = _cohp_summary_block(res, inp)
+    if inp.bader.enabled:
+        summary["bader"] = _bader_summary_block(res, inp)
+    if inp.work_function.enabled or inp.scf.boundary in (
+            "open_z", "open_z_metal"):
+        summary["work_function"] = _work_function_summary_block(res, inp)
+
+
 def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir.
@@ -133,23 +159,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     _frames = None
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
+        # Dispersion folds its energy into res.energies, so it must run BEFORE
+        # build_summary reads the total/free energy; the block is attached in
+        # _scf_summary_extras afterwards.
         disp_block = _apply_dispersion(res, inp) if inp.dispersion.enabled else None
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
-        if disp_block is not None:
-            summary["dispersion"] = disp_block
-        if inp.error_estimate:
-            summary["error_estimate"] = _error_estimate_block(res, inp)
-        if inp.projections.enabled:
-            summary["pdos"] = _pdos_summary_block(res, inp)
-        if inp.projections.cohp.enabled:
-            summary["cohp"] = _cohp_summary_block(res, inp)
-        if inp.bader.enabled:
-            summary["bader"] = _bader_summary_block(res, inp)
-        # work function: on request, or automatically for an open-boundary (ESM)
-        # slab run where the vacuum plateau is physically meaningful
-        if inp.work_function.enabled or inp.scf.boundary in (
-                "open_z", "open_z_metal"):
-            summary["work_function"] = _work_function_summary_block(res, inp)
+        _scf_summary_extras(res, inp, summary, disp_block)
     elif inp.task == "relax":
         relax, _atoms, _frames = run_relax(inp, verbose=verbose)
         summary = _base_summary(inp, "relax")

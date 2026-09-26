@@ -2096,6 +2096,7 @@ def scf(
     # exchange energy scalar. Like DFT+U, the operator lags one iteration (built
     # from the previous step's orbitals) and converges as the density does; the
     # matching semilocal-exchange down-scaling lives in the passed-in `xc`.
+    # === setup: configuration — opts re-entry, memory/k levers, eigensolver, validation ===
     if opts is not None:
         # opts is the readable form of every flat config kwarg; the guard in
         # _nc_kwargs_from_opts rejects a non-default flat kwarg alongside opts
@@ -2284,6 +2285,8 @@ def scf(
     # per-iteration primitive-op tally (FFT/eigh/H-apply) for the recorder; the
     # loop snapshots the delta each outer iteration and restores the default-off
     # state on exit (finally, below).
+    # === setup: frozen operators + initial state (projectors, V_loc, Ewald,
+    #     seed density/orbitals, preallocation) — inside the op-count/try scope ===
     opcount.enable()
     try:
 
@@ -2413,6 +2416,7 @@ def scf(
                 flush=True,
             )
 
+        # === iteration ===
         for it in range(1, max_iter + 1):
             t_it = time.perf_counter()
             _op_prev = opcount.snapshot()      # per-iteration primitive-op baseline
@@ -2732,6 +2736,7 @@ def scf(
             # (total, mag) → per-channel r-space densities (MixLayout.unpack)
             rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
+        # === finalize: convergence report ===
         # Band-count guard (collinear nspin=2): warn when the majority channel
         # is not fully accommodated by nbands (shared with the USPP/PAW driver).
         warn_band_count(logger, occ_s, nb, nspin, setup_fn="setup_system")
@@ -2760,6 +2765,7 @@ def scf(
 
     finally:
         opcount.disable()   # restore the default-off tally state after the run
+    # === finalize: result assembly (density gather, energies, SCFResult) ===
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     # The loop above always runs (max_iter >= 1 in practice) so these are real
     # values from the last iteration by the time we get here, never the

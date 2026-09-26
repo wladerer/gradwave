@@ -739,10 +739,10 @@ ignore = [
 "tests/**" = ["SIM115", "RUF043", "ISC002"]
 
 [tool.ruff.lint.mccabe]
-# Ratchet: set just above the current worst offenders (_relax_nested / scf_uspp
-# at 43) so this BLOCKS new complexity while grandfathering existing
-# god-functions. Lower it as those functions get decomposed; never raise it.
-max-complexity = 44
+# Ratchet: set at the current worst offender (scf in scf/loop.py at 41) so this
+# BLOCKS new complexity while grandfathering existing god-functions. Lower it as
+# those functions get decomposed; never raise it.
+max-complexity = 41
 
 [tool.codespell]
 # Spell-check for code/comments/docstrings. Run: uv run codespell (wired as a
