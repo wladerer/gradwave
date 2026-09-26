@@ -18,14 +18,14 @@ flowchart TB
     subgraph C["Layer C · orchestration"]
         direction LR
         cli["cli.py"]
-        inputs["inputs.py"]
-        api["api.py"]
+        inputs["inputs/"]
+        api["api/"]
         calc["calculator.py"]
     end
     subgraph B["Layer B · iterative solvers (torch.no_grad)"]
         direction LR
         scf["scf/ — SCF drivers"]
-        solvers["solvers/ — registry: Davidson, Chebyshev, LOBPCG"]
+        solvers["solvers/ — registry: Davidson, Chebyshev, davidson-native"]
     end
     subgraph A["Layer A · differentiable physics"]
         direction LR
@@ -61,14 +61,31 @@ are detached, and the gradient is recovered analytically (stationarity for
 `dE/dtheta`, an implicit-differentiation solve for the density response). This
 boundary is the single most important invariant in the codebase.
 
-**Layer C — orchestration (`api.py`, `inputs.py`, `cli.py`, `calculator.py`).**
-The user-facing surface. `inputs.py` parses YAML into a frozen `Input`, `api.py`
-builds the `System` and dispatches the task, and `cli.py` and `calculator.py`
-are the two front doors (command line and ASE calculator).
+**Layer C — orchestration (`api/`, `inputs/`, `cli.py`, `calculator.py`).**
+The user-facing surface. The `inputs/` package parses YAML into a frozen `Input`
+(`models.py` holds the dataclass schema, `parse.py` the loading and validation),
+the `api/` package builds the `System` and dispatches the task (split by task
+into `system`, `scf`, `relax`, `eos`, and the rest, with `dispatch` as the
+entry point), and `cli.py` and `calculator.py` are the two front doors (command
+line and ASE calculator). Both packages re-export their public surface from
+`__init__`, so `from gradwave.api import run` and `from gradwave.inputs import
+Input` stay valid.
 
 Post-SCF properties (`postscf/`) sit above this stack: each one takes a
 converged result and computes a property, often by running one more autograd
 pass through the Layer A energy (forces, stress, phonons, dielectric response).
+
+### Import conventions
+
+Import from the leaf module that owns a symbol — the physics subpackage
+`__init__.py` files (`core/`, `scf/`, `solvers/`, `postscf/`, `pseudo/`) are
+intentionally empty, and underscore-prefixed names are internal. The two
+exceptions are `api/` and `inputs/`, which re-export their public surface from
+`__init__` (preserving the historical flat-module paths), so
+`from gradwave.api import run` and `from gradwave.inputs import Input` stay
+valid. When monkeypatching an `api` internal in a test, patch the owning leaf
+module (e.g. `gradwave.api.relax._build_relax_calc`), not the package
+re-export — the drivers call their own module globals.
 
 ## Subsystem map
 
@@ -165,7 +182,7 @@ flowchart TB
 
     scf --> fork{"formalism"}
     fork -->|norm-conserving| ncscf["scf loop (scf/loop.py)"]
-    fork -->|USPP/PAW| uscf["scf_uspp (scf/uspp.py)"]
+    fork -->|USPP/PAW| uscf["scf_uspp (scf/uspp_loop.py)"]
 
     ncscf --> res["converged result"]
     uscf --> res
@@ -228,6 +245,7 @@ import (`solvers/registry.py`):
 |---|---|---|
 | `davidson` | batched block Davidson | the default |
 | `chebyshev` | Chebyshev-filtered subspace (CheFSI) | no preconditioner, reports its filter degree |
+| `davidson-native` | compiled (FFTW + CBLAS + LAPACKE) block Davidson | one C call, OpenMP over k, no framework dispatch; CPU-only, falls back to eager for out-of-scope solves (hybrid Fock, USPP, non-CPU) |
 
 The registry stays in Layer B and imports only sibling solver modules, so the
 adapter boundary keeps the loop free of any per-solver branching. See
