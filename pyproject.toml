@@ -656,6 +656,28 @@ include = [
     "src/gradwave/postscf/optics.py",
     "src/gradwave/postscf/surface_energy.py",
     "src/gradwave/scf/subspace_chi0.py",
+    #
+    # Phase 14 (2026-09-26): the last unlisted src/gradwave modules. Three were
+    # already clean (zero error-level diagnostics, verified by listing them and
+    # running ty check): _matmul.py, scf/_woodbury.py, solvers/native/__init__.py.
+    # The other three needed a small annotation/narrowing fix apiece (no runtime
+    # behavior change):
+    #   * postscf/magnons.py: from_shells' `shells: list[dict]` bare generic ->
+    #     list[dict[str, Any]]; two ExchangeBond(...) constructions already carried
+    #     the right `# type: ignore` intent but the bond field types are widened to
+    #     accept the general Sequence shapes; the Optional `labels`/`x` reads narrowed.
+    #   * postscf/unfold.py: a `list[Tensor]` accumulator that legitimately holds
+    #     None entries retyped to list[Tensor | None].
+    #   * solvers/native_davidson.py: a passed callable was treated as a bound
+    #     method (`.__self__`) unconditionally; narrowed with getattr(fn,
+    #     "__self__", None) so ty sees the plain-function case without changing the
+    #     runtime path.
+    "src/gradwave/_matmul.py",
+    "src/gradwave/scf/_woodbury.py",
+    "src/gradwave/solvers/native/__init__.py",
+    "src/gradwave/postscf/magnons.py",
+    "src/gradwave/postscf/unfold.py",
+    "src/gradwave/solvers/native_davidson.py",
 ]
 
 [tool.ty.overrides.rules]

@@ -271,7 +271,13 @@ def native_davidson_adapter(
         r.diagnostics["fallback_reason"] = reason
         return r
 
-    h = apply_H.__self__  # type: ignore[attr-defined]  # gated above
+    # _unsupported_reason returned None above, which means it found a bound
+    # BatchedHamiltonian on apply_H.__self__; re-derive it the same way so ty
+    # sees the concrete type (a plain Callable has no __self__).
+    from gradwave.core.batch import BatchedHamiltonian
+
+    h = getattr(apply_H, "__self__", None)
+    assert isinstance(h, BatchedHamiltonian)  # gated above
     bk = h.bk
     nk, nb, m = X0.shape
     n1, n2, n3 = h.shape

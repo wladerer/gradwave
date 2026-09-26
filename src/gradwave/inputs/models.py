@@ -1468,6 +1468,11 @@ class NmrParams:
 
 @dataclass(frozen=True)
 class Input:
+    """The validated, frozen calculation schema — the single structured object a
+    task driver consumes (built by :func:`gradwave.inputs.load_input` from a
+    TOML/YAML file or constructed directly); each ``*Params`` field groups one
+    subsystem's settings, documented inline on its own dataclass."""
+
     atoms: Atoms
     pseudo_dir: Path
     pseudo_map: dict[str, str]
