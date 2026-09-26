@@ -314,8 +314,7 @@ config echo plus `peak_ppm`, `ppm_range`, and the `(ppm_axis, intensity)` arrays
 the frozen-core (Lamb) shielding term agrees with the FLAPW all-electron core to
 a few percent, and the diamagnetic augmentation of a free atom recovers the
 expected magnitudes ($\sim 14.8$ ppm for ¹⁷O, an order of magnitude above ²⁹Si's
-$\sim 0.9$ ppm, matching Yates–Pickard–Mauri). The absolute GIPAW $\sigma$ is
-anchored to published diamond-Si ²⁹Si and other GIPAW references.
+$\sim 0.9$ ppm, matching Yates–Pickard–Mauri). Absolute shieldings become experimentally-comparable chemical shifts only through a reference: supply one with `nmr.sigma_ref`, or compute it on a reference solid with `api.reference_sigma_iso` (gradwave ships no built-in absolute standard).
 
 ## Scope and limitations
 
