@@ -189,8 +189,11 @@ def unfold_bands(
     # residue classes, so we must key the weight on the path point, not on K.
     # Diagonalize the unique K set once; recompute the (cheap, integer) mask per
     # path point sharing that K.
-    coeffs_by_K: dict[int, list[torch.Tensor]] = {sp: [None] * nK for sp in range(nspin)}  # type: ignore[misc]
-    millers_by_K: list[torch.Tensor] = [None] * nK  # type: ignore[list-item]
+    # Pre-sized with None placeholders; every slot is filled by the loop below
+    # (each unique K is diagonalized exactly once) before any read.
+    coeffs_by_K: dict[int, list[torch.Tensor | None]] = {
+        sp: [None] * nK for sp in range(nspin)}
+    millers_by_K: list[torch.Tensor | None] = [None] * nK
 
     for lo, hi, sp, _nspin, spheres, out in _diagonalize_at_kpts(
         res, fm.unique_K, nbands, diago_tol, verbose):
@@ -207,10 +210,13 @@ def unfold_bands(
     weights = np.empty((nspin, len(fm.kpts_prim), nbands))
     for ip in range(len(fm.kpts_prim)):
         uk = int(fm.image[ip])
-        mask = residue_mask(millers_by_K[uk], fm.offset[ip], Minv_T)
+        miller = millers_by_K[uk]
+        assert miller is not None  # every unique K was filled above
+        mask = residue_mask(miller, fm.offset[ip], Minv_T)
         for sp in range(nspin):
             eigenvalues[sp, ip] = folded[sp, uk]
             c = coeffs_by_K[sp][uk]              # (nb, npw) complex
+            assert c is not None  # every unique K was filled above
             w = (c.abs() ** 2 * mask[None, :]).sum(dim=1)
             weights[sp, ip] = w.cpu().numpy()
 

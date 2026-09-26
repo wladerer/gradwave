@@ -41,6 +41,7 @@ layer converts to meV.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -139,7 +140,7 @@ class HeisenbergModel:
         cls,
         cell,
         spins,
-        shells: list[dict],
+        shells: list[dict[str, Any]],
         *,
         positions=None,
         moments=None,
@@ -165,7 +166,9 @@ class HeisenbergModel:
             gamma = sh.get("gamma")
             for r in sh["rs"]:
                 r = tuple(int(x) for x in r)
-                bonds.append(ExchangeBond(i, j, r, jiso, dm, gamma))  # type: ignore[arg-type]
+                bonds.append(ExchangeBond(
+                    i, j, cast("tuple[int, int, int]", r), jiso,
+                    cast("tuple[float, float, float]", dm), gamma))
                 rev = tuple(-x for x in r)
                 # reverse tensor is the transpose: DM negates, Γ transposes (Γ is
                 # symmetric so unchanged), J unchanged.
@@ -174,8 +177,9 @@ class HeisenbergModel:
                     None if gamma is None
                     else tuple(tuple(gamma[b][a] for b in range(3)) for a in range(3)))
                 if (rev, j, i) != (r, i, j):  # skip a self-bond that is its own reverse
-                    bonds.append(
-                        ExchangeBond(j, i, rev, jiso, rev_dm, rev_gamma))  # type: ignore[arg-type]
+                    bonds.append(ExchangeBond(
+                        j, i, cast("tuple[int, int, int]", rev), jiso,
+                        cast("tuple[float, float, float]", rev_dm), rev_gamma))
         return cls(
             cell=cell, spins=spins, bonds=bonds, positions=positions,
             moments=moments, anisotropy_k=anisotropy_k, easy_axis=easy_axis)
@@ -202,6 +206,7 @@ def _local_frames(model: HeisenbergModel) -> torch.Tensor:
     (ê1, ê2, ê_moment) is a right-handed orthonormal triad — the Holstein-
     Primakoff local frame for each sublattice's moment direction."""
     n = model.n_sub
+    assert model.moments is not None  # set unconditionally in __post_init__
     u = torch.zeros(n, 3, dtype=torch.complex128)
     for a in range(n):
         eta = _unit(torch.as_tensor(model.moments[a], dtype=torch.float64))
