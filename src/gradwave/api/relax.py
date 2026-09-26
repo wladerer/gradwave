@@ -15,6 +15,7 @@ from gradwave.inputs import Input, InputError
 
 if TYPE_CHECKING:
     from ase import Atoms
+    from ase.filters import FrechetCellFilter
 
     from gradwave.calculator import GradWave
     from gradwave.pseudo.upf import UPFData
@@ -209,6 +210,205 @@ def run_relax(
     return _relax_nested(inp, verbose)
 
 
+def _apply_selective_dynamics(atoms: Atoms, fixed: Any) -> None:
+    """Constrain each atom's masked axes in FRACTIONAL space (selective dynamics).
+
+    Held atoms ride the cell under a variable-cell relax. ASE applies the
+    constraint inside ``get_forces`` (zeroing the held components before the
+    optimizer sees them and before its fmax gate) and inside the position update
+    (so a fully-fixed atom never moves). ``FixScaled`` masks the same axes for a
+    fixed cell too, where fractional and Cartesian coincide. Mutates ``atoms`` in
+    place; ``fixed`` is the per-atom boolean mask array (True = axis held)."""
+    from ase.constraints import FixScaled
+
+    atoms.set_constraint([
+        FixScaled(i, mask=tuple(bool(b) for b in fixed[i]))
+        for i in range(len(atoms)) if bool(fixed[i].any())
+    ])
+
+
+def _make_cell_filter(atoms: Atoms, inp: Input) -> FrechetCellFilter:
+    """Wrap ``atoms`` in a FrechetCellFilter for a variable-cell relax.
+
+    The filter adds the cell degrees of freedom, so ``opt.run(fmax)`` then gates
+    BOTH the atomic forces and the stress (external pressure subtracted). ASE
+    stress/pressure is eV/Å³; the user knob is GPa, converted here."""
+    from ase.filters import FrechetCellFilter
+
+    gpa_to_ev_a3 = 1.0 / EV_A3_TO_GPA
+    return FrechetCellFilter(atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
+
+
+def _resolve_line_search(
+    target: Atoms | FrechetCellFilter, inp: Input, verbose: bool
+) -> tuple[Any, str | None]:
+    """Select the parallel/speculative line-search optimizer, or fall back.
+
+    Returns ``(ls_opt, ls_fallback_reason)``. The parallel line search (opt-in via
+    ``relax.line_search``) replaces each positions-only bfgs step's fixed length
+    with one parallel round (see opt/line_search.py); a cell or non-bfgs request
+    keeps the serial step and records why, so the default and unsupported paths
+    stay byte-identical to today. ``ls_opt`` is ``None`` when the caller should
+    build the plain serial optimizer instead."""
+    ls_mode = inp.relax.line_search
+    if ls_mode == "off":
+        return None, None
+    if inp.relax.cell:
+        reason: str | None = "cell relaxation (line search is positions-only)"
+    elif inp.relax.optimizer != "bfgs":
+        reason = f"optimizer={inp.relax.optimizer!r} (line search needs bfgs)"
+    else:
+        from gradwave.opt.line_search import make_line_search_bfgs
+
+        ls_opt = make_line_search_bfgs(target, inp=inp, verbose=verbose)
+        if verbose:
+            print(f"  relax: {ls_mode} line search "
+                  f"({inp.relax.line_search_n_samples} samples, "
+                  f"{inp.relax.line_search_n_workers} workers) — forward-only",
+                  flush=True)
+        return ls_opt, None
+    if verbose:
+        print(f"  relax: line_search={ls_mode!r} ignored — "
+              f"{reason}; serial step", flush=True)
+    return None, reason
+
+
+def _seed_initial_hessian(
+    opt: Any, atoms: Atoms, inp: Input, verbose: bool
+) -> None:
+    """Seed a Lindh model Hessian into the BFGS optimizer (atomic DOFs only).
+
+    A curvature-aware start keeps early steps from overshooting the stiff
+    directions. A cell relax keeps the default (the model covers atomic DOFs
+    only); a DOF mismatch is reported and skipped. No-op unless
+    ``relax.initial_hessian`` is ``'lindh'``."""
+    if inp.relax.initial_hessian != "lindh":
+        return
+    if inp.relax.cell:
+        if verbose:
+            print("  relax: initial_hessian=lindh ignored under a cell relax "
+                  "(atomic model Hessian only)", flush=True)
+        return
+    from gradwave.opt.model_hessian import lindh_hessian, seed_bfgs_hessian
+
+    h0 = lindh_hessian(atoms.get_positions(),
+                       list(atoms.get_atomic_numbers()))
+    applied = seed_bfgs_hessian(opt, h0)
+    if verbose:
+        print("  relax: initial_hessian=lindh "
+              f"({'applied' if applied else 'skipped — DOF mismatch'})",
+              flush=True)
+
+
+def _build_relax_summary(
+    inp: Input,
+    atoms: Atoms,
+    target: Atoms | FrechetCellFilter,
+    opt: Any,
+    trajectory: list[dict[str, Any]],
+    converged: bool,
+    final_resolve_iter: int | None,
+    ls_mode: str,
+    ls_fallback_reason: str | None,
+    verbose: bool,
+) -> dict[str, Any]:
+    """Assemble the ``relax`` summary dict from the completed optimization.
+
+    Pure reporting: reads the converged ``atoms``/``target``/``opt`` state and the
+    per-step ``trajectory`` and folds in the tol-ladder, line-search, extrapolation
+    and (cell-relax) Pulay/stress diagnostics. ``final_resolve_iter`` is the
+    exactness re-solve's SCF iteration count (or ``None`` when the ladder is off).
+    Emits the Pulay-pressure warning when a cell relax's estimate is large."""
+    import numpy as np
+
+    relax: dict[str, Any] = {
+        "converged": bool(converged),
+        "method": "nested",
+        "n_steps": opt.nsteps,
+        "optimizer": inp.relax.optimizer,
+        "cell_relaxed": bool(inp.relax.cell),
+        "fmax_target_eV_ang": inp.relax.fmax,
+        "energy_eV": float(atoms.get_potential_energy()),
+        # the optimizer's convergence quantity (target = FrechetCellFilter under
+        # a cell relax, so this includes stress), matching the per-step fmax and
+        # the fmax_target gate — not the atomic-only forces
+        "fmax_eV_ang": float(
+            np.linalg.norm(target.get_forces(), axis=1).max()),
+        "max_displacement_ang": float(np.linalg.norm(
+            atoms.get_positions() - inp.atoms.get_positions(),
+            axis=1).max()),
+        "species": atoms.get_chemical_symbols(),
+        "positions_ang": atoms.get_positions().tolist(),
+        "cell_ang": atoms.cell.array.tolist(),
+        "volume_ang3": float(atoms.get_volume()),
+        "trajectory": trajectory,
+    }
+    scf_iters = [s["scf_iter"] for s in trajectory if "scf_iter" in s]
+    if scf_iters:
+        relax["scf_iter_per_step"] = scf_iters
+        relax["scf_total_iter"] = int(sum(scf_iters))
+        relax["scf_all_converged"] = all(
+            s.get("scf_converged", True) for s in trajectory)
+    if inp.relax.tol_ladder:
+        relax["tol_ladder"] = True
+        if final_resolve_iter is not None:
+            # the exactness re-solve's SCF iterations are part of the total cost
+            relax["final_resolve_scf_iter"] = int(final_resolve_iter)
+            if "scf_total_iter" in relax:
+                relax["scf_total_iter"] += int(final_resolve_iter)
+    relax["extrapolation"] = inp.relax.extrapolation
+    if ls_mode != "off":
+        # document the parallel line search: whether it engaged, and (adaptive)
+        # how many ionic steps actually fanned candidates out vs took the serial
+        # step — so an easy relax shows a dormant trigger and a soft/overshoot
+        # relax shows it firing.
+        relax["line_search"] = ls_mode
+        if ls_fallback_reason is not None:
+            relax["line_search_active"] = False
+            relax["line_search_fallback_reason"] = ls_fallback_reason
+        else:
+            events = list(getattr(opt, "_ls_events", []))
+            relax["line_search_active"] = True
+            relax["line_search_n_samples"] = inp.relax.line_search_n_samples
+            relax["line_search_n_workers"] = inp.relax.line_search_n_workers
+            relax["line_search_steps_searched"] = int(
+                sum(1 for e in events if e.get("searched")))
+            relax["line_search_events"] = events
+    if getattr(atoms.calc, "_density_clamped", False):
+        # the extrapolated density dipped negative on at least one step and was
+        # clamped to zero then renormalized to N_e (a benign, recorded fallback)
+        relax["extrapolation_density_clamped"] = True
+    if trajectory:
+        relax["energy_change_eV"] = (
+            float(atoms.get_potential_energy()) - trajectory[0]["energy_eV"])
+        relax["volume_change_ang3"] = (
+            float(atoms.get_volume()) - float(abs(np.linalg.det(
+                np.asarray(trajectory[0]["cell_ang"])))))
+    last = getattr(atoms.calc, "last_result", None)
+    if last is not None and getattr(last, "system", None) is not None:
+        relax["nk_ibz"] = len(last.system.kweights)
+    if inp.relax.cell:
+        relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
+        relax["pressure_GPa"] = inp.relax.pressure
+        pulay_final = getattr(atoms.calc, "last_pulay_pressure_gpa", None)
+        relax["pulay_correction"] = pulay_final is not None
+        if pulay_final is not None:
+            relax["pulay_pressure_GPa_final"] = round(float(pulay_final), 4)
+            if abs(pulay_final) > _PULAY_WARN_GPA and verbose:
+                print(f"  relax: WARNING — estimated Pulay pressure "
+                      f"{pulay_final:+.1f} GPa exceeds {_PULAY_WARN_GPA:.0f} GPa: "
+                      "the stress at this ecut is severely underconverged. The "
+                      "correction reduces but does not eliminate the bias "
+                      "(first-order estimate, ~0.5-0.75x); increase ecut before "
+                      "trusting the relaxed cell.", flush=True)
+    if inp.fixed is not None:
+        # record the selective-dynamics mask (True = axis held fixed) so the
+        # output documents which degrees of freedom were frozen
+        relax["fixed"] = inp.fixed.tolist()
+        relax["n_fixed_atoms"] = int(inp.fixed.any(axis=1).sum())
+    return relax
+
+
 def _relax_nested(
     inp: Input, verbose: bool = True
 ) -> tuple[dict[str, Any], Atoms, list[Atoms]]:
@@ -216,18 +416,7 @@ def _relax_nested(
 
     atoms = inp.atoms.copy()
     if inp.fixed is not None:
-        # Selective dynamics: fix each atom's masked axes in FRACTIONAL space, so
-        # held atoms ride the cell under a variable-cell relax. ASE applies the
-        # constraint inside get_forces (zeroing the held components before the
-        # optimizer sees them and before its fmax gate) and inside the position
-        # update (so a fully-fixed atom never moves). FixScaled masks the same
-        # axes for a fixed cell too, where fractional and Cartesian coincide.
-        from ase.constraints import FixScaled
-
-        atoms.set_constraint([
-            FixScaled(i, mask=tuple(bool(b) for b in inp.fixed[i]))
-            for i in range(len(atoms)) if bool(inp.fixed[i].any())
-        ])
+        _apply_selective_dynamics(atoms, inp.fixed)
     # VASP OSZICAR-style output: a per-ionic-step header above that step's SCF
     # trace. The calculator fires _scf_header once per FRESH SCF (one per
     # geometry — cached property fetches don't re-trigger it), so ion_step["n"]
@@ -245,39 +434,9 @@ def _relax_nested(
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     target: Atoms | FrechetCellFilter = atoms
     if inp.relax.cell:
-        from ase.filters import FrechetCellFilter
-
-        # ASE stress/pressure is eV/Å³; the user knob is GPa. The filter adds
-        # the cell degrees of freedom, so opt.run(fmax) then gates BOTH the
-        # atomic forces and the stress (external pressure subtracted).
-        gpa_to_ev_a3 = 1.0 / EV_A3_TO_GPA
-        target = FrechetCellFilter(
-            atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
-    # Parallel/speculative line search (opt-in): a positions-only bfgs relax may
-    # replace each step's fixed length with one parallel round (see
-    # opt/line_search.py). A cell/fire request keeps the serial step and records
-    # why, so the default and unsupported paths stay byte-identical to today.
+        target = _make_cell_filter(atoms, inp)
     ls_mode = inp.relax.line_search
-    ls_opt: Any = None
-    ls_fallback_reason: str | None = None
-    if ls_mode != "off":
-        if inp.relax.cell:
-            ls_fallback_reason = "cell relaxation (line search is positions-only)"
-        elif inp.relax.optimizer != "bfgs":
-            ls_fallback_reason = (
-                f"optimizer={inp.relax.optimizer!r} (line search needs bfgs)")
-        else:
-            from gradwave.opt.line_search import make_line_search_bfgs
-
-            ls_opt = make_line_search_bfgs(target, inp=inp, verbose=verbose)
-            if verbose:
-                print(f"  relax: {ls_mode} line search "
-                      f"({inp.relax.line_search_n_samples} samples, "
-                      f"{inp.relax.line_search_n_workers} workers) — forward-only",
-                      flush=True)
-        if ls_fallback_reason is not None and verbose:
-            print(f"  relax: line_search={ls_mode!r} ignored — "
-                  f"{ls_fallback_reason}; serial step", flush=True)
+    ls_opt, ls_fallback_reason = _resolve_line_search(target, inp, verbose)
     # ASE's Optimizer.__init__ declares atoms: Atoms, but at runtime accepts
     # any Atoms-like object implementing get_positions/get_forces/etc. —
     # every ase.filters wrapper (FrechetCellFilter included) is meant to be
@@ -384,23 +543,7 @@ def _relax_nested(
                 logger.warning("could not append relax step to %s: %s",
                                traj_path, exc)
 
-    if inp.relax.initial_hessian == "lindh":
-        # seed a curvature-aware model Hessian so early steps don't overshoot the
-        # stiff directions (atomic DOFs only — a cell relax keeps the default)
-        if inp.relax.cell:
-            if verbose:
-                print("  relax: initial_hessian=lindh ignored under a cell relax "
-                      "(atomic model Hessian only)", flush=True)
-        else:
-            from gradwave.opt.model_hessian import lindh_hessian, seed_bfgs_hessian
-
-            h0 = lindh_hessian(atoms.get_positions(),
-                               list(atoms.get_atomic_numbers()))
-            applied = seed_bfgs_hessian(opt, h0)
-            if verbose:
-                print("  relax: initial_hessian=lindh "
-                      f"({'applied' if applied else 'skipped — DOF mismatch'})",
-                      flush=True)
+    _seed_initial_hessian(opt, atoms, inp, verbose)
 
     opt.attach(_record)
     try:
@@ -410,7 +553,6 @@ def _relax_nested(
         _close_pool = getattr(opt, "_ls_close_pool", None)
         if callable(_close_pool):
             _close_pool()
-    import numpy as np
 
     # Exactness gate for the tolerance ladder: the trajectory above converged the
     # SCFs to a schedule of loosened rhotol, so re-solve the final geometry ONCE
@@ -423,91 +565,9 @@ def _relax_nested(
                   "rhotol (exactness gate) …", flush=True)
         final_resolve_iter = atoms.calc.resolve_full_tol()
 
-    relax: dict[str, Any] = {
-        "converged": bool(converged),
-        "method": "nested",
-        "n_steps": opt.nsteps,
-        "optimizer": inp.relax.optimizer,
-        "cell_relaxed": bool(inp.relax.cell),
-        "fmax_target_eV_ang": inp.relax.fmax,
-        "energy_eV": float(atoms.get_potential_energy()),
-        # the optimizer's convergence quantity (target = FrechetCellFilter under
-        # a cell relax, so this includes stress), matching the per-step fmax and
-        # the fmax_target gate — not the atomic-only forces
-        "fmax_eV_ang": float(
-            np.linalg.norm(target.get_forces(), axis=1).max()),
-        "max_displacement_ang": float(np.linalg.norm(
-            atoms.get_positions() - inp.atoms.get_positions(),
-            axis=1).max()),
-        "species": atoms.get_chemical_symbols(),
-        "positions_ang": atoms.get_positions().tolist(),
-        "cell_ang": atoms.cell.array.tolist(),
-        "volume_ang3": float(atoms.get_volume()),
-        "trajectory": trajectory,
-    }
-    scf_iters = [s["scf_iter"] for s in trajectory if "scf_iter" in s]
-    if scf_iters:
-        relax["scf_iter_per_step"] = scf_iters
-        relax["scf_total_iter"] = int(sum(scf_iters))
-        relax["scf_all_converged"] = all(
-            s.get("scf_converged", True) for s in trajectory)
-    if inp.relax.tol_ladder:
-        relax["tol_ladder"] = True
-        if final_resolve_iter is not None:
-            # the exactness re-solve's SCF iterations are part of the total cost
-            relax["final_resolve_scf_iter"] = int(final_resolve_iter)
-            if "scf_total_iter" in relax:
-                relax["scf_total_iter"] += int(final_resolve_iter)
-    relax["extrapolation"] = inp.relax.extrapolation
-    if ls_mode != "off":
-        # document the parallel line search: whether it engaged, and (adaptive)
-        # how many ionic steps actually fanned candidates out vs took the serial
-        # step — so an easy relax shows a dormant trigger and a soft/overshoot
-        # relax shows it firing.
-        relax["line_search"] = ls_mode
-        if ls_fallback_reason is not None:
-            relax["line_search_active"] = False
-            relax["line_search_fallback_reason"] = ls_fallback_reason
-        else:
-            events = list(getattr(opt, "_ls_events", []))
-            relax["line_search_active"] = True
-            relax["line_search_n_samples"] = inp.relax.line_search_n_samples
-            relax["line_search_n_workers"] = inp.relax.line_search_n_workers
-            relax["line_search_steps_searched"] = int(
-                sum(1 for e in events if e.get("searched")))
-            relax["line_search_events"] = events
-    if getattr(atoms.calc, "_density_clamped", False):
-        # the extrapolated density dipped negative on at least one step and was
-        # clamped to zero then renormalized to N_e (a benign, recorded fallback)
-        relax["extrapolation_density_clamped"] = True
-    if trajectory:
-        relax["energy_change_eV"] = (
-            float(atoms.get_potential_energy()) - trajectory[0]["energy_eV"])
-        relax["volume_change_ang3"] = (
-            float(atoms.get_volume()) - float(abs(np.linalg.det(
-                np.asarray(trajectory[0]["cell_ang"])))))
-    last = getattr(atoms.calc, "last_result", None)
-    if last is not None and getattr(last, "system", None) is not None:
-        relax["nk_ibz"] = len(last.system.kweights)
-    if inp.relax.cell:
-        relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
-        relax["pressure_GPa"] = inp.relax.pressure
-        pulay_final = getattr(atoms.calc, "last_pulay_pressure_gpa", None)
-        relax["pulay_correction"] = pulay_final is not None
-        if pulay_final is not None:
-            relax["pulay_pressure_GPa_final"] = round(float(pulay_final), 4)
-            if abs(pulay_final) > _PULAY_WARN_GPA and verbose:
-                print(f"  relax: WARNING — estimated Pulay pressure "
-                      f"{pulay_final:+.1f} GPa exceeds {_PULAY_WARN_GPA:.0f} GPa: "
-                      "the stress at this ecut is severely underconverged. The "
-                      "correction reduces but does not eliminate the bias "
-                      "(first-order estimate, ~0.5-0.75x); increase ecut before "
-                      "trusting the relaxed cell.", flush=True)
-    if inp.fixed is not None:
-        # record the selective-dynamics mask (True = axis held fixed) so the
-        # output documents which degrees of freedom were frozen
-        relax["fixed"] = inp.fixed.tolist()
-        relax["n_fixed_atoms"] = int(inp.fixed.any(axis=1).sum())
+    relax = _build_relax_summary(
+        inp, atoms, target, opt, trajectory, converged, final_resolve_iter,
+        ls_mode, ls_fallback_reason, verbose)
     return relax, atoms, frames
 
 
