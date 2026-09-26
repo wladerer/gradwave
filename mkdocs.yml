@@ -52,6 +52,8 @@ nav:
           - Basis-set error estimation: error-estimation.md
       - Post-SCF analysis:
           - Densities, bonding, phonons, and response: postscf-analysis.md
+      - All-electron and spectroscopy:
+          - All-electron FLAPW and NMR/EFG/XPS: flapw-spectroscopy.md
   - Inputs and outputs: io.md
   - Output schema: output-schema.md
   - Reference: reference.md
