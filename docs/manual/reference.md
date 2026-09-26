@@ -23,8 +23,9 @@ docstrings.
 | `<task>.out` | human report |
 | `checkpoint.pt` | restartable SCF state, density and becsum by default |
 
-`<task>` is `scf`, `relax`, `bands`, `magnetism`, `eos`, `elastic`, or
-`phonons`. See [Inputs and outputs](io.md) for the JSON key list, the checkpoint
+`<task>` is one of `scf`, `relax`, `neb`, `bands`, `optics`, `magnetism`, `eos`,
+`elastic`, `phonons`, `thermochem`, `surface_energy`, `qha`, `magnons`, `flapw`,
+or `nmr`. See [Inputs and outputs](io.md) for the JSON key list, the checkpoint
 API, and the analysis helpers.
 
 ## Key entry points
