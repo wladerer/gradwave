@@ -166,6 +166,14 @@ Bare O now moves ~12% (same sign, no divergence) while cond(S) climbs 2186 →
 anchor. NC-limit gate (CG with S = I → plain-NC resolvent to CG tol) and the
 backend selector (dense ≤ 50, CG > 50) pass.
 
+> **Full dense-vs-CG ecut ladder now recorded** (`mgo_17o_cg_convergence.md`,
+> asus @ `main` e23c7768). Same MgO ground state, 40/50/60/70 Ry, BOTH backends:
+> the dense bare ¹⁷O swings −1872 → −3237 → −3779 → −3395 (~1900 ppm range, +384
+> ppm over 60 → 70 Ry, non-monotonic — the ill-conditioned instability, cond(S)
+> 2186 → 6247), while the CG bare ¹⁷O plateaus −70.5 → −72.0 → −61.8 → −57.4
+> (14.6 ppm over the whole ladder, +4.4 ppm over 60 → 70). The divergence is
+> closed.
+
 **Warm-starting the CG measured NULL (left off by default).** Seeding each solve
 from the adjacent ∂/∂q stage (previous q̂ pol → δu⁰, δu⁰ → δu¹) over 120 MgO CG
 solves: cold total 2676 (mean 22.3) → warm total 2965 (mean 24.7) — **+11%,

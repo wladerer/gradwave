@@ -48,7 +48,15 @@ nbands 12/14, SCF converged to |drho| < 6e-9):
 
 vs the ≈215 ppm ¹⁷O anchor (and ≈560 ppm ²⁵Mg): the O smooth bare term is
 wildly wrong and **diverges with ecut** (−1912 → −3758 going 40 → 60 Ry at
-fixed mesh), so this is not a basis-convergence tail. The core/dia_aug terms are
+fixed mesh), so this is not a basis-convergence tail.
+
+> **Update — the ecut divergence is now closed by the CG backend.** The dense
+> resolvent's divergence and the matrix-free S-metric CG resolvent's
+> ecut-stability are recorded on a fixed MgO ground state (dense vs CG, 40–70 Ry
+> ladder) in `mgo_17o_cg_convergence.md`: the CG bare ¹⁷O plateaus to +4.4 ppm
+> over 60 → 70 Ry where the dense bare swings +384 ppm over the same step. The
+> absolute anchor gap is a separate (stable) convergence/pseudo matter; the
+> ecut-divergence blocker is resolved. The core/dia_aug terms are
 stable and sane; the sickness is isolated to the smooth analytic-USPP
 `sigma_shielding_dq` bare route (and the para_aug that consumes its response) on
 the hard-augmentation O dataset with semicore Mg. The same assembly on the soft
